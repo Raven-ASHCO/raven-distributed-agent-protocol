@@ -9,8 +9,9 @@
     ./rdap ask "task"    delegate a signed task to a teammate
 
 On Windows use ``rdap.cmd`` instead of ``./rdap``. OPEN MODE (``--open`` /
-``TEAM_REQUIRE_SIGNED=0``) is never the default. Advanced flags still exist
-in ``python -m team_agents --help``.
+``TEAM_REQUIRE_SIGNED=0``) is never the default. ``.team/keys`` is this
+snapshot's RDAP identity, not raven-node. Signed HTTP is not confidential
+ATSAM. Advanced flags still exist in ``python -m team_agents --help``.
 """
 
 from __future__ import annotations
@@ -325,7 +326,7 @@ def _cmd_init_locked(args) -> None:
     else:
         role = input('role (optional, enter to skip): ').strip()
 
-    print(ui.dim('* generating raven identity…'))
+    print(ui.dim('* generating RDAP Raven key under .team/keys (not raven-node)…'))
     repo.mkdir(parents=True, exist_ok=True)
     repo_metadata = os.lstat(repo)
     if repo.is_symlink() or not stat.S_ISDIR(repo_metadata.st_mode):
@@ -468,6 +469,10 @@ def _cmd_init_locked(args) -> None:
     ], title=f'{name} is ready')
     print(f'\n{ui.bold("share this invite with teammates:")}')
     print(ui.cyan(invite_line(st)))
+    print(
+        '\nThis is standalone signed RDAP. `.team/keys` is not raven-node. '
+        'HTTP is signed/pinned, not confidential ATSAM.'
+    )
     print(f'\nnext: `{_cli()} start --provider echo`  (no API key, signed by default)')
     print(f'      `{_cli()} invite --ip <this-host> --port 9001` after the node is up')
     if not st.get('llm'):
@@ -1156,9 +1161,14 @@ def cmd_discover(args) -> None:
                 )
             _save_json(STATE_FILE, st)
             save_peers(peers)
-        print(f"✔ trusted {node_name} ({addr[:18]}…) @ {node_url}   [TOFU]"
-              + ('  !experimental-plaintext-mailbox'
-                 if args.experimental_plaintext_mailbox and idn.get('mailbox') else ''))
+        print(
+            f"✔ trusted {node_name} ({addr[:18]}…) @ {node_url}   "
+            '[TOFU — public discovery, not a signed invite pin]'
+            + (
+                '  !experimental-plaintext-mailbox (not Raven E2EE)'
+                if args.experimental_plaintext_mailbox and idn.get('mailbox') else ''
+            )
+        )
 
 
 def cmd_mesh_build(args) -> None:
@@ -2134,6 +2144,8 @@ def cmd_try(args) -> None:
         print()
         print(TRY_OK)
         print('This machine can run signed RDAP A2A.')
+        print('`.team/keys` is RDAP-only — you are not on raven-node.')
+        print('Signed HTTP ≠ confidential ATSAM; no EnqueueSealed/LanDial here.')
         print('First-ask checklist: both nodes still running; complete invite URL;')
         print(f'  `{_cli()} ping --name <peer>` ok; no --open; see README.')
         print('Cancel RPC `canceled` is a store force-save, not end-to-end')
@@ -2532,12 +2544,15 @@ def main() -> None:
     p = argparse.ArgumentParser(
         prog='rdap',
         description=(
-            'RDAP — signed agent-to-agent tasks. '
+            'RDAP — signed agent-to-agent tasks '
+            '(standalone; .team/keys is not raven-node). '
             f'Newcomer path: `{_cli()} try` then `{_cli()} init --name you --no-internet`.'
         ),
         epilog=(
             'OPEN MODE (--open / TEAM_REQUIRE_SIGNED=0) is never the default. '
-            'Do not add those flags for a first run.'
+            'Do not add those flags for a first run. Direct HTTP is signed/pinned, '
+            'not confidential ATSAM. Mailbox is experimental plaintext '
+            '(message_ciphertext is a field name, not Raven E2EE).'
         ),
     )
     sub = p.add_subparsers(dest='cmd', required=True)

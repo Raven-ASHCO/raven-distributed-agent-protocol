@@ -152,7 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog='team_agents',
         description=(
             'Advanced RDAP node CLI. Newcomer path: ./rdap try then '
-            './rdap start and ./rdap health. OPEN MODE (--open) is never default.'
+            './rdap start and ./rdap health. .team/keys is not raven-node. '
+            'Signed HTTP is not confidential ATSAM. OPEN MODE (--open) is never default.'
         ),
     )
     sub = p.add_subparsers(dest='cmd', required=True)

@@ -603,6 +603,14 @@ def unit_tests() -> None:
             ),
             help_text[:500],
         )
+        check(
+            'CLI help says .team/keys is not raven-node and HTTP is not ATSAM',
+            'not raven-node' in help_text
+            and 'not confidential' in help_text
+            and 'ATSAM' in help_text
+            and 'not Raven E2EE' in help_text,
+            help_text[-400:],
+        )
         posix_launcher = (PKG_ROOT / 'rdap').read_text(encoding='utf-8')
         check(
             'POSIX launcher documents python3-venv recovery',
