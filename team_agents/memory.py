@@ -104,13 +104,29 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _same_regular_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+def _same_regular_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    """True when both stats name the same regular, single-link file.
+
+    Size and inode identity detect path swaps. Timestamps are not compared
+    here: on Windows, ``lstat`` (directory enumeration) and ``fstat``
+    (GetFileTime) can report different ``st_mtime_ns`` / ``st_ctime_ns``
+    for an unchanged file because the directory clock is coarse. Treating
+    that cross-API disagreement as a swap drops valid newest events from
+    :meth:`TeamMemory.recent_events`.
+    """
     return (
         _same_file_identity(left, right)
         and stat.S_ISREG(right.st_mode)
         and not _is_link_or_reparse(right)
         and right.st_nlink == 1
         and left.st_size == right.st_size
+    )
+
+
+def _same_regular_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+    """True when identity matches and same-API timestamps agree."""
+    return (
+        _same_regular_identity(left, right)
         and left.st_mtime_ns == right.st_mtime_ns
         and left.st_ctime_ns == right.st_ctime_ns
     )
@@ -156,7 +172,9 @@ def _read_stable_regular_file(
         except OSError:
             return None, 0
         if not (
-            _same_regular_snapshot(expected, opened)
+            # lstat vs fstat: identity/size only. Timestamp equality is
+            # reserved for same-API pairs below (Windows coarse clocks).
+            _same_regular_identity(expected, opened)
             and _same_regular_snapshot(expected, before)
         ):
             return None, 0
@@ -177,8 +195,8 @@ def _read_stable_regular_file(
             return None, consumed
         if not (
             len(data) == expected.st_size
-            and _same_regular_snapshot(expected, after_fd)
-            and _same_regular_snapshot(expected, after_path)
+            and _same_regular_snapshot(opened, after_fd)
+            and _same_regular_snapshot(before, after_path)
         ):
             return None, consumed
         return bytes(data), consumed
@@ -1147,6 +1165,9 @@ class TeamMemory:
         except OSError:
             pass
 
+        # Newest-first by explicit JSON ``at``, then writer/filename.
+        # Filesystem mtimes are not a sort key: Windows directory clocks
+        # are often one- or two-second, so same-second creates collapse.
         accepted.sort(key=lambda item: item[:3], reverse=True)
         return [item[3] for item in accepted[:requested]]
 
