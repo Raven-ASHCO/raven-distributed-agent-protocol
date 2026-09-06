@@ -255,10 +255,11 @@ The default server rejects unsigned RPC traffic and unsigned tasks. A trusted pe
   is still a silent empty deny-list (not an affirmed empty list). See
   [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
 - Cancellation requires the task owner's fresh Raven request signature. The
-  Cancel RPC caller sees a store-forced A2A `canceled` status; a different
-  trusted peer receives task-not-found. That force-save is **not** end-to-end
-  terminal: the executor/brain may still complete (open gap
-  [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1).
+  Cancel RPC may force-save `CANCELED` for that caller (other peers get
+  task-not-found). **Residual cancel-status skew remains open** — see
+  [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1; not claimed
+  closed / not fully terminal-correct until Role #14 closes it. Do **not** read
+  this as “emits a terminal A2A canceled status.”
 - Delegation authentication runs before task text reaches durable team memory or
   Git sync; unsigned, invalid, and policy-error requests receive an A2A rejection
   without journaling their payload or moving repository state.
@@ -331,11 +332,11 @@ teammate with that destination's token file.
 
 ## Current carriers
 
-| Carrier | Confidentiality/status |
-|---|---|
-| Direct A2A HTTP | Signed and peer-pinned; HTTP payload confidentiality requires HTTPS or another protected network layer |
-| Git relay | Signed task and signed answer; repository access controls provide transport confidentiality |
-| Raven swarm mailbox adapter | **Disabled by default and plaintext**; signed JSON is placed in an RVN1 ciphertext field but is not Raven E2EE |
+| Carrier | Name | Confidentiality/status |
+|---|---|---|
+| Direct A2A HTTP | `http_signed` | Signed and peer-pinned; HTTP payload confidentiality requires HTTPS or another protected network layer. Signed ≠ confidential. |
+| Git relay | `git_relay` | Signed task and signed answer; repository access controls provide transport confidentiality |
+| Raven swarm mailbox adapter | `experimental_plaintext_mailbox` | **Disabled by default and plaintext**; signed JSON is placed in an RVN1 `message_ciphertext` field but is not Raven E2EE |
 
 The mailbox adapter requires the explicit `--experimental-plaintext-mailbox` flag. It must not be described or deployed as confidential Raven messaging.
 
@@ -391,7 +392,7 @@ export TEAM_LLM_API_KEY_FILE="$HOME/.config/rdap/custom-llm-key"
 
 RDAP currently creates its own key under `.team/keys` and does not submit or receive application payloads through the production `raven-node` ATSAM session actor. The experimental mailbox invokes the separately gated `raven-swarm-mailbox-experimental` binary, not the normal terminal node. Unifying RDAP with the node identity/protected store and encrypted Raven carrier remains required before this can truthfully be called “A2A over production Raven Node.”
 
-That includes the Sprint O6 two-device Raven↔RDAP crypto path: it is **not** present in this snapshot and is not invented here. Use signed standalone RDAP (Quickstart / First task) until the monorepo lands that integration.
+That includes the Sprint O6 two-device Raven↔RDAP crypto path: it is **not** present in this snapshot and is not invented here. Design-only pointer (verified on RAVEN `main`): [`docs/adr/0004-raven-rdap-atsam-transport.md`](https://github.com/Raven-ASHCO/RAVEN/blob/main/docs/adr/0004-raven-rdap-atsam-transport.md). Use signed standalone RDAP (Quickstart / First task) until the monorepo lands that integration.
 
 ## Verify
 
