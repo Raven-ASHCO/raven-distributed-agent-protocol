@@ -75,7 +75,7 @@ a step. OPEN MODE stays off.
 | 1. Install | `git clone …` then `cd raven-distributed-agent-protocol` (Debian/Ubuntu: `python3-venv` first) | repo is on disk |
 | 2. Prove the machine | `./rdap try` (or `./rdap doctor` then `./rdap selftest`) | `RDAP_DOCTOR_OK` and `RDAP_TRY_OK` |
 | 3. Init each home | `RDAP_HOME=… ./rdap init --name <you> --no-internet` | invite line printed |
-| 4. Start each node | `RDAP_HOME=… ./rdap start --ip … --port … --provider echo` | process stays running; no `--open` |
+| 4. Start each node | `RDAP_HOME=… ./rdap start --ip … --port … --provider echo` | process stays running; no `--open`; no `--experimental-plaintext-mailbox` |
 | 4b. Health | `./rdap health --url http://127.0.0.1:<port>` or `curl -sS http://127.0.0.1:<port>/health` | `{"status":"ok"}` |
 | 5. Invite | `RDAP_HOME=… ./rdap invite --ip … --port …` | five-field `RDAP1 … http://…` line |
 | 6. Trust | `RDAP_HOME=… ./rdap trust '<complete invite>'` | `trusted` after live card check |
@@ -86,10 +86,16 @@ Before step 8, also confirm:
 
 - Both `start` processes are still running (`trust` / `ask` need a live card).
 - The invite pasted into `trust` includes the `http://host:port` URL.
-- No `--open`, no `--allow-shell`, no `TEAM_REQUIRE_SIGNED=0`.
+- No `--open`, no `--allow-shell`, no `--experimental-plaintext-mailbox`, no `TEAM_REQUIRE_SIGNED=0`.
 - `TEAM_REVOCATIONS` is unset by default: signed mode boots with a **silent
-  empty deny-list**. That is not “I affirmed nobody is revoked.” Doctor reports
-  this. See [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+  empty deny-list**. That is not “I affirmed nobody is revoked.” Signed-mode
+  **require-file** is decided policy, **not yet enforced**. Doctor warns if
+  unset. See [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+- Optional cancel: only the task owner’s signed Cancel applies; other peers
+  see task-not-found. Cancel force-saves `CANCELED` for the caller, but the
+  brain may still complete — open gap
+  [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1; not fully
+  terminalized yet.
 
 Statuses after `ask` are listed under [What a task looks like (short)](#what-a-task-looks-like-short). Do not treat Cancel as fully terminalized yet.
 
@@ -139,7 +145,7 @@ RDAP_HOME="$PWD/bob-home" ./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_ALICE' --
 
 On Windows, replace `./rdap` with `rdap.cmd`, `export RDAP_HOME=...` with `set RDAP_HOME=...`, and use double quotes around each invite/task string.
 
-Do not add `--open` or `--allow-shell` for this first task.
+Do not add `--open`, `--allow-shell`, or `--experimental-plaintext-mailbox` for this first task.
 
 ## Runtime first-run (start → health → signed task)
 

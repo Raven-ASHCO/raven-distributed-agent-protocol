@@ -1863,6 +1863,11 @@ def _run_doctor(url: str = '', port: int = 0) -> int:
         print(f'       next: {next_step}')
 
     print('RDAP doctor — checking this machine (OPEN MODE stays off)\n')
+    ok(
+        'discover is public TOFU',
+        'not a signed invite pin; discover never sends Bearer — use '
+        f'`{_cli()} trust \'<invite>\'`',
+    )
 
     version = sys.version_info
     if version >= (3, 10):
