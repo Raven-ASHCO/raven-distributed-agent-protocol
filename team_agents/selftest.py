@@ -873,6 +873,7 @@ def unit_tests() -> None:
         check(
             'Role #13 must-fixes remain (revocation bridge, cancel §9.1, first-ask, doctor)',
             '## First-ask checklist' in readme_text
+            and 'What just happened (task lifecycle)' in readme_text
             and 'docs/rdap-revocation.md' in readme_text
             and '§9.1' in readme_text
             and 'silent empty' in revocation_text
