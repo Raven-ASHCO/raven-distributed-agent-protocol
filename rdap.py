@@ -472,14 +472,25 @@ def _cmd_init_locked(args) -> None:
     _save_json(STATE_FILE, current)
     st = current
 
-    ui.box([
+    ready_rows = [
         ('identity ', address),
         ('display  ', rvn_display(address)),
-        ('keys     ', str(Path(repo) / '.team' / 'keys')),
         ('online   ', 'yes' if has_net else 'local-only'),
-    ], title=f'{name} is ready')
+    ]
+    if already_bound:
+        ready_rows.insert(2, ('pin      ', ash_invite_line(st)))
+        ready_rows.insert(3, (
+            'bind     ',
+            'same-RVN1 public (NON-RELEASE / HOLD; not confidential)',
+        ))
+    else:
+        ready_rows.insert(2, ('keys     ', str(Path(repo) / '.team' / 'keys')))
+    ui.box(ready_rows, title=f'{name} is ready')
     print(f'\n{ui.bold("share this invite with teammates:")}')
     print(ui.cyan(invite_line(st)))
+    if already_bound:
+        print(ui.cyan(ash_invite_line(st)))
+        print('ash-contact pin of this user-identity RVN1 (pin is not device_ed_pub).')
     print(f'\nnext: `{_cli()} start --provider echo`  (no API key, signed by default)')
     print(f'      `{_cli()} invite --ip <this-host> --port 9001` after the node is up')
     if not st.get('llm'):
@@ -488,6 +499,13 @@ def _cmd_init_locked(args) -> None:
 
 def invite_line(st: dict) -> str:
     return f'RDAP1 {st["name"]} {st["address"]} {st["public_key"]}'
+
+
+def ash_invite_line(st: dict) -> str:
+    """Ash-style contact pin of the advertised user-identity RVN1."""
+    from team_agents.raven_bind import ash_contact_invite
+
+    return ash_contact_invite(str(st['address']), str(st['public_key']))
 
 
 def _read_whoami_bytes(path: Path) -> bytes:
@@ -603,6 +621,7 @@ def cmd_raven_bind(args) -> None:
     print('OPEN MODE stays off. Invite/trust now pin this same user-identity RVN1.')
     if st.get('name'):
         print(ui.dim('invite: ') + invite_line(st))
+        print(ui.dim('pin:    ') + ash_invite_line(st))
 
 
 def _add_bind_args(parser: argparse.ArgumentParser) -> None:
@@ -801,12 +820,46 @@ def cmd_trust(args) -> None:
         line = input('> ').strip()
 
     parts = line.split()
-    if len(parts) not in {4, 5} or parts[0] != 'RDAP1':
+    invite_url = ''
+    from team_agents.raven_bind import (
+        ConfidentialClaimError,
+        PrivateKeyMaterialError,
+        parse_ash_contact_pin,
+    )
+
+    if parts and parts[0].startswith('raven:'):
+        if len(parts) not in {1, 2}:
+            sys.exit(
+                'invalid ash contact pin — expected: raven:<rvn1>:<pub_hex> '
+                '[http(s)://host:port] (pin is user-identity RVN1, not device_ed_pub)'
+            )
+        try:
+            whoami = parse_ash_contact_pin(parts[0])
+        except PrivateKeyMaterialError:
+            sys.exit('invite rejected: private key material is present')
+        except ConfidentialClaimError as exc:
+            sys.exit(str(exc))
+        except ValueError as exc:
+            sys.exit(f'invalid ash contact pin: {exc}')
+        addr, pub = whoami.address, whoami.public_key
+        tname = str(getattr(args, 'name', '') or '').strip()
+        if not tname:
+            sys.exit(
+                'ash contact pin requires --name <alias>; the pin is the '
+                'user-identity RVN1 (not device_ed_pub)'
+            )
+        if len(parts) == 2:
+            invite_url = parts[1]
+    elif len(parts) in {4, 5} and parts[0] == 'RDAP1':
+        _, tname, addr, pub = parts[:4]
+        if len(parts) == 5:
+            invite_url = parts[4]
+    else:
         sys.exit(
-            'invalid invite — expected: RDAP1 <name> <rvn1...> '
-            '<64-hex pubkey> [http(s)://host:port]'
+            'invalid invite — expected RDAP1 <name> <rvn1...> <64-hex pubkey> '
+            '[url], or ash-style raven:<rvn1>:<pub_hex> with --name '
+            '(user-identity RVN1 pin; not device_ed_pub)'
         )
-    _, tname, addr, pub = parts[:4]
     try:
         _validate_mate_name(tname)
         validate_address_public_key(addr, pub)
@@ -823,11 +876,10 @@ def cmd_trust(args) -> None:
             f'{", ".join(collisions)}; trust was not stored'
         )
 
-    invite_url = ''
     cli_url = ''
     try:
-        if len(parts) == 5:
-            invite_url = _validated_node_url(parts[4])
+        if invite_url:
+            invite_url = _validated_node_url(invite_url)
         if getattr(args, 'url', ''):
             cli_url = _validated_node_url(args.url)
     except ValueError as exc:
@@ -1160,6 +1212,18 @@ def cmd_invite(args) -> None:
         url = f'http://{advertised_ip}:{args.port}'
         line += f' {url}'
     print(line)
+    from team_agents.raven_bind import bound_principal
+
+    if bound_principal(st) is not None:
+        ash = ash_invite_line(st)
+        if url:
+            print(f'{ash} {url}')
+        else:
+            print(ash)
+        print(
+            'ash-contact pin of this user-identity RVN1 '
+            '(pin is not device_ed_pub). NON-RELEASE / HOLD.'
+        )
 
 
 def cmd_discover(args) -> None:
@@ -2743,7 +2807,16 @@ def main() -> None:
     t = sub.add_parser('trust', help="register a teammate's invite")
     t.add_argument(
         'invite', nargs='?',
-        help='four-field RDAP1 line, optionally followed by its http(s) URL',
+        help=(
+            'RDAP1 <name> <rvn1> <pub> [url], or ash-style '
+            'raven:<rvn1>:<pub_hex> with --name (user-identity pin; '
+            'not device_ed_pub)'
+        ),
+    )
+    t.add_argument(
+        '--name',
+        default='',
+        help='teammate alias required when the invite is an ash contact pin',
     )
     t.add_argument('--url', default='', help='verified node URL when invite has none')
     t.add_argument('--token-file', default='', help='Bearer token file for identity fetch')

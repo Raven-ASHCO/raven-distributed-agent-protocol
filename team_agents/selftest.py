@@ -135,6 +135,7 @@ def unit_tests() -> None:
             PrivateKeyMaterialError,
             apply_bind,
             bound_principal,
+            parse_ash_contact_pin,
             parse_public_whoami,
             refuse_confidential_claim,
             resolve_node_export,
@@ -220,6 +221,20 @@ def unit_tests() -> None:
             check('device_ed_pub is not accepted as the pin', False)
         except ValueError:
             check('device_ed_pub is not accepted as the pin', True)
+        ash_pin = parse_ash_contact_pin(
+            f'raven:{alice.address}:{alice.public_hex}'
+        )
+        check(
+            'ash contact pin is the user-identity RVN1',
+            ash_pin.address == alice.address
+            and ash_pin.public_key == alice.public_hex
+            and ash_pin.pin_kind == 'ash-contact',
+        )
+        try:
+            parse_ash_contact_pin(f'raven:{alice.address}:{eve.public_hex}')
+            check('ash pin with mismatched device-like key rejected', False)
+        except ValueError:
+            check('ash pin with mismatched device-like key rejected', True)
 
         from team_agents.config import NodeConfig, load_trusted_peers
 
@@ -873,6 +888,74 @@ def unit_tests() -> None:
                 f'pre={prebind.returncode} init={post_init.returncode} '
                 f'state={post_state!r} seed={seed_after.exists()} '
                 f'stderr={post_init.stderr[-500:]!r}'
+            ),
+        )
+        invite_after = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'invite'],
+            cwd=PKG_ROOT,
+            env=bind_then_init_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        invite_out = invite_after.stdout + invite_after.stderr
+        ash_alice = f'raven:{alice.address}:{alice.public_hex}'
+        check(
+            'invite after bind is ash-style contact pin of the same RVN1',
+            invite_after.returncode == 0
+            and f'RDAP1 bound-agent {alice.address} {alice.public_hex}' in invite_out
+            and ash_alice in invite_out
+            and 'pin is not device_ed_pub' in invite_out
+            and 'HOLD' in invite_out,
+            invite_out[-700:],
+        )
+
+        trust_home = tmp / 'trust-ash-pin'
+        trust_home.mkdir()
+        trust_env = {**init_env, 'RDAP_HOME': str(trust_home)}
+        trust_init = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'init', '--name', 'truster', '--role', 'test', '--no-internet',
+            ],
+            cwd=PKG_ROOT,
+            env=trust_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        trust_ash = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'trust', ash_alice, '--name', 'alice-node',
+            ],
+            cwd=PKG_ROOT,
+            env=trust_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        trusted_peers = {}
+        peers_path = trust_home / 'peers.json'
+        if peers_path.is_file():
+            trusted_peers = json.loads(peers_path.read_text(encoding='utf-8'))
+        trusted_state = {}
+        if (trust_home / 'rdap.json').is_file():
+            trusted_state = json.loads(
+                (trust_home / 'rdap.json').read_text(encoding='utf-8')
+            )
+        mate = (trusted_state.get('teammates') or {}).get('alice-node', {})
+        check(
+            'trust maps ash contact pin to the same user-identity RVN1',
+            trust_init.returncode == 0
+            and trust_ash.returncode == 0
+            and trusted_peers.get(alice.address) == alice.public_hex
+            and mate.get('address') == alice.address
+            and mate.get('public_key') == alice.public_hex,
+            (
+                f'init={trust_init.returncode} trust={trust_ash.returncode} '
+                f'peers={trusted_peers!r} mate={mate!r} '
+                f'stderr={trust_ash.stderr[-400:]!r}'
             ),
         )
         posix_launcher = (PKG_ROOT / 'rdap').read_text(encoding='utf-8')

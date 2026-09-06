@@ -139,6 +139,21 @@ def ash_contact_invite(address: str, public_key: str) -> str:
     return f'raven:{address}:{public_key}'
 
 
+def parse_ash_contact_pin(token: str) -> PublicWhoami:
+    """Parse ``raven:<rvn1>:<user-identity-pub-hex>``. Pin ≢ device_ed_pub."""
+    raw = str(token).strip()
+    if not raw.startswith('raven:') or raw.count(':') != 2:
+        raise ValueError(
+            'ash contact pin must be raven:<rvn1>:<pub_hex> of the user-identity RVN1'
+        )
+    _, address, public_key = raw.split(':', 2)
+    return parse_public_whoami({
+        'schema': WHOAMI_SCHEMA,
+        'address': address,
+        'public_key': public_key,
+    })
+
+
 def refuse_confidential_claim(carrier: str = 'atsam_rvn1') -> None:
     """Always fail-closed. M1 is public bind only; HOLD is active."""
     raise ConfidentialClaimError(
