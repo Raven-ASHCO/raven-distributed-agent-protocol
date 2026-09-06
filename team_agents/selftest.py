@@ -595,9 +595,12 @@ def unit_tests() -> None:
         )
         help_text = help_result.stdout + help_result.stderr
         check(
-            'newcomer CLI advertises try, doctor, and selftest',
+            'newcomer CLI advertises try, doctor, health, and selftest',
             help_result.returncode == 0
-            and all(command in help_text for command in ('try', 'doctor', 'selftest')),
+            and all(
+                command in help_text
+                for command in ('try', 'doctor', 'health', 'selftest')
+            ),
             help_text[:500],
         )
         posix_launcher = (PKG_ROOT / 'rdap').read_text(encoding='utf-8')
@@ -624,7 +627,8 @@ def unit_tests() -> None:
             and 'RDAP_DOCTOR_OK' in doctor_out
             and 'OPEN MODE is off' in doctor_out
             and 'revocations_file is unset' in doctor_out
-            and 'docs/rdap-revocation.md' in doctor_out,
+            and 'docs/rdap-revocation.md' in doctor_out
+            and 'port 9001' in doctor_out,
             f'rc={doctor_result.returncode} out={doctor_out[-700:]!r}',
         )
 
@@ -704,8 +708,29 @@ def unit_tests() -> None:
             unset_doctor.returncode == 0
             and 'RDAP_DOCTOR_OK' in unset_out
             and 'ready before init' in unset_out
-            and 'revocations_file is unset' in unset_out,
+            and 'revocations_file is unset' in unset_out
+            and 'port 9001' in unset_out,
             f'rc={unset_doctor.returncode} out={unset_out[-700:]!r}',
+        )
+
+        health_result = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'health', '--url', 'http://127.0.0.1:1',
+            ],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        health_out = health_result.stdout + health_result.stderr
+        check(
+            'health command tells the next step when /health is down',
+            health_result.returncode != 0
+            and '/health failed' in health_out
+            and 'rdap start' in health_out,
+            f'rc={health_result.returncode} out={health_out[-500:]!r}',
         )
 
         import rdap as rdap_cli
@@ -2149,6 +2174,7 @@ print('import-without-fcntl-ok')
             occupied_refused = (
                 str(occupied_port) in str(exc)
                 and occupied_cfg.port == occupied_port
+                and 'next:' in str(exc)
             )
         finally:
             occupied_socket.close()

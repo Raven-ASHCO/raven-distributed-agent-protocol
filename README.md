@@ -58,6 +58,7 @@ a step. OPEN MODE stays off.
 | 2. Prove the machine | `./rdap try` (or `./rdap doctor` then `./rdap selftest`) | `RDAP_DOCTOR_OK` and `RDAP_TRY_OK` |
 | 3. Init each home | `RDAP_HOME=… ./rdap init --name <you> --no-internet` | invite line printed |
 | 4. Start each node | `RDAP_HOME=… ./rdap start --ip … --port … --provider echo` | process stays running; no `--open` |
+| 4b. Health | `./rdap health --url http://127.0.0.1:<port>` or `curl -sS http://127.0.0.1:<port>/health` | `{"status":"ok"}` |
 | 5. Invite | `RDAP_HOME=… ./rdap invite --ip … --port …` | five-field `RDAP1 … http://…` line |
 | 6. Trust | `RDAP_HOME=… ./rdap trust '<complete invite>'` | `trusted` after live card check |
 | 7. Ping | `RDAP_HOME=… ./rdap ping --name <peer>` | `alive` |
@@ -129,6 +130,43 @@ RDAP_HOME="$PWD/bob-home" ./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_ALICE' --
 On Windows, replace `./rdap` with `rdap.cmd`, `export RDAP_HOME=...` with `set RDAP_HOME=...`, and use double quotes around each invite/task string.
 
 Do not add `--open` or `--allow-shell` for this first task.
+
+## Runtime first-run (start → health → signed task)
+
+`./rdap try` is the zero-placeholder signed proof (same suite as CI). After
+that, this copy-paste path starts a real node, checks `/health`, and sends one
+signed task. OPEN MODE stays off.
+
+Terminal 1:
+
+```bash
+cd raven-distributed-agent-protocol
+./rdap init --name you --role explorer --no-internet
+./rdap start --ip 127.0.0.1 --port 9001 --provider echo
+```
+
+Equivalent advanced entrypoint (after `./rdap` has created `.venv`):
+
+```bash
+.venv/bin/python -m team_agents serve --name you --host 127.0.0.1 --port 9001 \
+  --repo team-repo --peers peers.json --provider echo
+```
+
+On Windows use `.venv\Scripts\python.exe -m team_agents serve ...`.
+
+Terminal 2 — health, then the first signed client task. `./rdap try` is the
+copy-paste signed task that works from a clean clone (no invite placeholders).
+A second signed `ask` needs a trusted peer (see [First-ask checklist](#first-ask-checklist)).
+
+```bash
+./rdap health --url http://127.0.0.1:9001
+curl -sS http://127.0.0.1:9001/health
+./rdap try
+```
+
+`--open` / `TEAM_REQUIRE_SIGNED=0` is a documented dangerous opt-in only. Do
+not use it for this first run. Cancel RPC `canceled` is a store force-save, not
+end-to-end terminal ([`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1).
 
 ## Two devices on a trusted LAN
 

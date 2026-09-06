@@ -874,7 +874,14 @@ def cmd_start(args) -> None:
         print('! ! ! OPEN MODE EXPLICITLY ENABLED: unsigned LAN tasks will execute ! ! !')
     if args.experimental_plaintext_mailbox:
         print('! EXPERIMENTAL PLAINTEXT MAILBOX ENABLED — no Raven E2EE/confidentiality')
-    serve(cfg)
+    try:
+        serve(cfg)
+    except RuntimeError as exc:
+        sys.exit(f'{exc}')
+    except (PermissionError, ValueError) as exc:
+        from team_agents.runtime_hints import hint_missing_keys
+
+        sys.exit(f'{exc}. {hint_missing_keys(str(repo / ".team" / "keys"))}')
 
 
 def cmd_model(args) -> None:
@@ -1655,15 +1662,18 @@ def cmd_ask(args) -> None:
                 )
                 target.update(copy.deepcopy(teammate_updates))
             print(f'✔ {target_name} alive — sending task …')
-            result = asyncio.run(send_task(
-                url,
-                args.text,
-                identity=idn,
-                expected_peer_address=peer_addr,
-                expected_peer_public_key=peer_pub,
-                token_file=args.token_file,
-                timeout=90,
-            ))
+            try:
+                result = asyncio.run(send_task(
+                    url,
+                    args.text,
+                    identity=idn,
+                    expected_peer_address=peer_addr,
+                    expected_peer_public_key=peer_pub,
+                    token_file=args.token_file,
+                    timeout=90,
+                ))
+            except (TimeoutError, ConnectionError, RuntimeError) as exc:
+                sys.exit(str(exc))
             print(result)
             return
         ui.err('[direct] unreachable')
@@ -1728,7 +1738,55 @@ def cmd_ask(args) -> None:
 from team_agents.ui import ARROW, dim  # noqa: F401
 
 
-def _run_doctor() -> int:
+def _http_health(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    import httpx
+
+    base = str(url).rstrip('/')
+    try:
+        response = httpx.get(base + '/health', timeout=timeout, trust_env=False)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)[:180]
+    body = (response.text or '').strip()
+    if response.status_code == 200 and 'ok' in body.lower():
+        return True, body[:120]
+    return False, f'HTTP {response.status_code} {body[:80]}'
+
+
+def _port_status(host: str, port: int) -> str:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(0.4)
+    try:
+        probe.connect((host, port))
+        return 'occupied'
+    except OSError:
+        return 'free'
+    finally:
+        probe.close()
+
+
+def cmd_health(args) -> None:
+    raw = str(getattr(args, 'url', '') or '')
+    if not raw:
+        raw = f'http://127.0.0.1:{int(getattr(args, "port", 0) or 9001)}'
+    try:
+        url = _validated_node_url(raw)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    ok, detail = _http_health(url)
+    if ok:
+        print(f'✔ /health {detail}')
+        print(
+            f'next: `{_cli()} ping --name <peer>` then '
+            f'`{_cli()} ask \'Reply exactly: RDAP_OK\' --name <peer>`'
+        )
+        print(f'      first signed proof without a second device: `{_cli()} try`')
+        return
+    from team_agents.runtime_hints import hint_unreachable
+
+    sys.exit(f'✗ /health failed: {detail}\n       next: {hint_unreachable(url)}')
+
+
+def _run_doctor(url: str = '', port: int = 0) -> int:
     """Check that this machine can run signed RDAP. Never enables OPEN MODE."""
     import shutil
     import subprocess
@@ -1916,6 +1974,79 @@ def _run_doctor() -> int:
             ok('trust file', str(PEERS_FILE))
         print(f'\nnext: `{_cli()} start --provider echo`  (keep signed; do not pass --open)')
 
+    listen_port = int(port or 9001)
+    occupancy = _port_status('127.0.0.1', listen_port)
+    if occupancy == 'free':
+        ok(f'port {listen_port}', 'free on 127.0.0.1 (start will bind it)')
+    elif missing_imports:
+        warn(
+            f'port {listen_port} occupied',
+            'install dependencies, then re-run doctor to probe /health',
+        )
+    else:
+        live, live_detail = _http_health(f'http://127.0.0.1:{listen_port}')
+        if live:
+            ok(f'port {listen_port}', f'in use and /health ok ({live_detail})')
+        else:
+            warn(
+                f'port {listen_port} occupied without RDAP /health',
+                f'pick another port for `start` and `invite`. {live_detail}',
+            )
+
+    probe_url = str(url or '').strip()
+    if probe_url and missing_imports:
+        bad(
+            '/health skipped',
+            'install dependencies, then re-run `rdap health --url ...`',
+        )
+    elif probe_url:
+        try:
+            probe_url = _validated_node_url(probe_url)
+        except ValueError as exc:
+            bad('invalid --url', str(exc))
+        else:
+            live, live_detail = _http_health(probe_url)
+            if live:
+                ok('/health', live_detail)
+            else:
+                from team_agents.runtime_hints import hint_unreachable
+
+                bad('/health failed', hint_unreachable(probe_url))
+
+    mates = st.get('teammates', {}) if isinstance(st, dict) else {}
+    live_mates = [
+        (name, mate) for name, mate in mates.items()
+        if isinstance(mate, dict)
+        and mate.get('url')
+        and mate.get('address')
+        and mate.get('public_key')
+    ]
+    if live_mates:
+        name, mate = live_mates[0]
+        try:
+            info = _probe(
+                str(mate['url']),
+                expected_address=str(mate['address']),
+                expected_public_key=str(mate['public_key']),
+                seconds=3,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warn(
+                f'signed peer probe ({name}) failed',
+                f'{exc}. next: start that node, then `{_cli()} ping --name {name}`',
+            )
+        else:
+            if info:
+                ok('signed peer probe', name)
+            else:
+                warn(
+                    f'signed peer probe ({name}) did not verify',
+                    f'start that node, then `{_cli()} ping --name {name}` / '
+                    f'`{_cli()} trust` with the live invite',
+                )
+    elif st.get('name'):
+        ok('signed peer probe', 'skipped (no trusted teammate URL yet)')
+
     if failed:
         print(f'\ndoctor failed ({failed} check(s)). Fix the "next:" lines above.')
         return 1
@@ -1935,7 +2066,10 @@ def _run_selftest(extra: list[str]) -> int:
 
 
 def cmd_doctor(args) -> None:
-    sys.exit(_run_doctor())
+    sys.exit(_run_doctor(
+        url=str(getattr(args, 'url', '') or ''),
+        port=int(getattr(args, 'port', 0) or 0),
+    ))
 
 
 def cmd_selftest(args) -> None:
@@ -1965,7 +2099,7 @@ def cmd_try(args) -> None:
         print('Unset TEAM_REVOCATIONS is a silent empty deny-list')
         print('  (docs/rdap-revocation.md) — not an affirmed empty list.')
         print('Next (README first-ask checklist):')
-        print(f'  try → init → start → invite → trust → ping → ask')
+        print('  try → init → start → health → invite → trust → ping → ask')
         print(f'  {_cli()} init --name you --role explorer --no-internet')
         print(f'  {_cli()} start --provider echo')
     else:
@@ -2372,9 +2506,16 @@ def main() -> None:
 
     doc = sub.add_parser(
         'doctor',
-        help='check Python, Git, dependencies, and signed-by-default',
+        help='check Python, Git, deps, signed-by-default, port, and /health',
     )
+    doc.add_argument('--url', default='', help='live node URL to GET /health')
+    doc.add_argument('--port', type=int, default=0, help='port to probe (default 9001)')
     doc.set_defaults(fn=cmd_doctor)
+
+    hl = sub.add_parser('health', help='GET /health on a running node')
+    hl.add_argument('--url', default='', help='node URL (default http://127.0.0.1:9001)')
+    hl.add_argument('--port', type=int, default=0, help='loopback port when --url is omitted')
+    hl.set_defaults(fn=cmd_health)
 
     stest = sub.add_parser(
         'selftest',

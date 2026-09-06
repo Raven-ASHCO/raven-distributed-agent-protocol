@@ -475,7 +475,9 @@ class RpcIngressLimitMiddleware:
                 self._slots.acquire(), timeout=self.queue_timeout_seconds
             )
         except asyncio.TimeoutError:
-            await self._error(scope, receive, send, 503, 'RPC capacity exhausted')
+            from .runtime_hints import hint_rpc_capacity
+
+            await self._error(scope, receive, send, 503, hint_rpc_capacity())
             return
 
         try:
@@ -673,7 +675,17 @@ def build_app(config: NodeConfig) -> Starlette:
 
     @asynccontextmanager
     async def _lifespan(a):
-        _start_services(a)
+        try:
+            _start_services(a)
+        except Exception as exc:
+            print(  # noqa: T201
+                f'! [{config.name}] lifespan/start failed: {exc}. '
+                f'next: check keys at {config.keys_dir}, TEAM_REVOCATIONS, '
+                'RDAP_POLL (1..3600), and that the repo path is a real directory. '
+                'Do not pass --open.',
+                flush=True,
+            )
+            raise
         try:
             yield
         finally:
@@ -1036,10 +1048,9 @@ def serve(config: NodeConfig) -> None:
         config.port = int(sock.getsockname()[1])
     except OSError as exc:
         sock.close()
-        raise RuntimeError(
-            f'configured port {requested_port} is unavailable; choose one explicit '
-            'port and use it for both `rdap invite` and `rdap start`'
-        ) from exc
+        from .runtime_hints import hint_port_busy
+
+        raise RuntimeError(hint_port_busy(requested_port)) from exc
 
     try:
         app = build_app(config)
@@ -1069,10 +1080,17 @@ def serve(config: NodeConfig) -> None:
             f'peers={len(cfg.trusted_peers)}',
             flush=True,
         )
+        health_url = f'{cfg.resolved_public_url()}/health'
+        print(  # noqa: T201
+            f'* [{cfg.name}] health: {health_url}   '
+            f'check with `rdap health --url {cfg.resolved_public_url()}` '
+            f'or `curl -sS {health_url}`',
+            flush=True,
+        )
         print(  # noqa: T201
             f'* [{cfg.name}] keep this process running. In another terminal: '
             f'`rdap invite --ip <this-host> --port {cfg.port}` then '
-            '`rdap trust` / `rdap ask`. Do not pass --open.',
+            '`rdap trust` / `rdap ping` / `rdap ask`. Do not pass --open.',
             flush=True,
         )
 
