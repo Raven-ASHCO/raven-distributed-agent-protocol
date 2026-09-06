@@ -2866,6 +2866,13 @@ def main() -> None:
             'M2 submit app payload to raven-node SealUnderSession IPC '
             '(plaintext-to-daemon only; NON-RELEASE / HOLD; not O6 Proven)'
         ),
+        description=(
+            'M2 plaintext-to-daemon SealUnderSession. Companion to RAVEN #54. '
+            'NON-RELEASE / HOLD. Not O6 Proven. No HOLD lift. '
+            'Submits peer_hint + app_payload_b64 to local raven-node IPC and '
+            'prints daemon envelope_b64. Does not construct ATSAM/RVNA1 locally. '
+            'Fail-closed: ATSAM_SESSION_REQUIRED, ATSAM_LINEAGE_REVOKED.'
+        ),
     )
     seal.add_argument(
         '--peer-hint',

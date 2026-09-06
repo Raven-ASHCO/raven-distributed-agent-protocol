@@ -377,11 +377,18 @@ def unit_tests() -> None:
         ipc_src = (PKG_ROOT / 'team_agents' / 'raven_ipc.py').read_text(encoding='utf-8')
         local_crypto_hits = []
         for token in (
-            'aead_seal', 'ChaCha20', 'XChaCha', 'AESGCM', 'RVNA1',
+            'aead_seal', 'ChaCha20', 'XChaCha', 'AESGCM',
             'send_message_envelope', 'indexed_session.seal',
+            'from cryptography', 'import cryptography',
         ):
             if token in ipc_src:
                 local_crypto_hits.append(token)
+        if _re.search(
+            r'(?:construct|encode|build|pack|cipher).{0,48}RVNA1'
+            r'|RVNA1.{0,48}(?:construct|encode|build|pack|cipher)',
+            ipc_src,
+        ):
+            local_crypto_hits.append('RVNA1-construct')
         extra_seal_modules = [
             path.name
             for path in (PKG_ROOT / 'team_agents').glob('*')
