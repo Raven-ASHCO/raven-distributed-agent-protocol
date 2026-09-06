@@ -269,6 +269,7 @@ def unit_tests() -> None:
             ATSAM_SESSION_REQUIRED,
             AtsamLineageRevoked,
             AtsamSessionRequired,
+            IPC_IO_TIMEOUT_MESSAGE,
             IPC_VERSION,
             OP_SEAL_UNDER_SESSION,
             RavenIpcError,
@@ -282,6 +283,7 @@ def unit_tests() -> None:
             seal_under_session_request,
             unix_socket_path,
         )
+        from team_agents.raven_ipc import _transact_file
 
         peer_hint = 'ab' * 32
         app_payload = b'rdap-m2-app-payload'
@@ -522,6 +524,67 @@ def unit_tests() -> None:
         check(
             'decode_response_frame reads length-prefixed JSON',
             decoded.get('envelope_b64') == 'QUJD',
+        )
+        check(
+            'named-pipe transact does not drop the timeout parameter',
+            'del timeout' not in ipc_src
+            and 'IPC_IO_TIMEOUT_MESSAGE' in ipc_src
+            and '_run_with_timeout' in ipc_src,
+        )
+
+        class _HangRead:
+            def write(self, data):
+                return len(data)
+
+            def flush(self):
+                return None
+
+            def read(self, n):
+                time.sleep(30)
+                return b'\x00' * n
+
+            def close(self):
+                return None
+
+        hang_req = seal_under_session_request(peer_hint, app_payload)
+        hang_started = time.monotonic()
+        try:
+            _transact_file(hang_req, _HangRead(), 0.2)
+            check('named-pipe I/O honors timeout', False)
+        except RavenIpcError as hang_exc:
+            hang_elapsed = time.monotonic() - hang_started
+            check(
+                'named-pipe I/O honors timeout',
+                hang_exc.code == 'IPC_FRAME'
+                and hang_exc.message == IPC_IO_TIMEOUT_MESSAGE
+                and hang_elapsed < 2.0,
+                f'elapsed={hang_elapsed:.3f}s code={hang_exc.code} msg={hang_exc.message!r}',
+            )
+
+        class _ReplyPipe:
+            def __init__(self, frame: bytes) -> None:
+                self._data = frame
+                self._off = 0
+
+            def write(self, data):
+                return len(data)
+
+            def flush(self):
+                return None
+
+            def read(self, n):
+                chunk = self._data[self._off:self._off + n]
+                self._off += len(chunk)
+                return bytes(chunk)
+
+            def close(self):
+                return None
+
+        piped = _transact_file(hang_req, _ReplyPipe(result_frame), 1.0)
+        check(
+            'named-pipe transact still succeeds when timeout is set',
+            piped.get('ok') == 'seal_under_session_result'
+            and piped.get('envelope_b64') == 'QUJD',
         )
 
         from team_agents.config import NodeConfig, load_trusted_peers

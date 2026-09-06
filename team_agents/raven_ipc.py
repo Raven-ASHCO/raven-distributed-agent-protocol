@@ -27,14 +27,18 @@ import base64
 import json
 import os
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Mapping
+from typing import BinaryIO, Callable, Mapping, TypeVar
 
 IPC_VERSION = 1
 MAX_IPC_FRAME = 256 * 1024
 IPC_IO_TIMEOUT_SEC = 10.0
+# Same refuse text raven-node uses for timed-out IPC I/O (code stays IPC_FRAME /
+# IPC_CONNECT — not a new claim).
+IPC_IO_TIMEOUT_MESSAGE = 'ipc read timeout'
 OP_SEAL_UNDER_SESSION = 'seal_under_session'
 OK_SEAL_UNDER_SESSION_RESULT = 'seal_under_session_result'
 ATSAM_SESSION_REQUIRED = 'ATSAM_SESSION_REQUIRED'
@@ -46,6 +50,7 @@ _PIPE_BUSY_WINERROR = 231
 _PIPE_BUSY_ATTEMPTS = 40
 
 TransactFn = Callable[[dict[str, object]], Mapping[str, object]]
+_T = TypeVar('_T')
 
 
 class RavenIpcError(RuntimeError):
@@ -305,23 +310,38 @@ def _transact_named_pipe(
 ) -> dict[str, object]:
     if os.name != 'nt':
         raise RavenIpcError('ipc_transport_missing', 'ipc_transport_missing')
-    handle = _open_named_pipe(name)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    handle = _open_named_pipe(name, timeout)
     try:
-        return _transact_file(req, handle, timeout)
+        remaining = deadline - time.monotonic()
+        return _transact_file(req, handle, remaining)
     finally:
-        handle.close()
+        try:
+            handle.close()
+        except OSError:
+            pass
 
 
-def _open_named_pipe(name: str) -> BinaryIO:
+def _open_named_pipe(name: str, timeout: float) -> BinaryIO:
+    deadline = time.monotonic() + max(0.0, float(timeout))
     last: OSError | None = None
     for attempt in range(_PIPE_BUSY_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RavenIpcError('IPC_CONNECT', IPC_IO_TIMEOUT_MESSAGE)
         try:
-            return open(name, 'r+b', buffering=0)  # noqa: SIM115
+            return _run_with_timeout(
+                remaining,
+                lambda: open(name, 'r+b', buffering=0),
+                timed_out=RavenIpcError('IPC_CONNECT', IPC_IO_TIMEOUT_MESSAGE),
+            )
+        except RavenIpcError:
+            raise
         except OSError as exc:
             last = exc
             winerror = getattr(exc, 'winerror', None)
             if winerror == _PIPE_BUSY_WINERROR and attempt + 1 < _PIPE_BUSY_ATTEMPTS:
-                time.sleep(0.05)
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
                 continue
             raise RavenIpcError(
                 'IPC_CONNECT',
@@ -344,21 +364,62 @@ def _transact_stream(req: Mapping[str, object], sock: socket.socket) -> dict[str
     return decode_response_frame(header + body)
 
 
+def _run_with_timeout(
+    timeout: float,
+    fn: Callable[[], _T],
+    *,
+    cancel: Callable[[], None] | None = None,
+    timed_out: RavenIpcError | None = None,
+) -> _T:
+    """Bound a blocking call. Used for Windows named-pipe I/O (no socket timeout)."""
+    box: list[_T] = []
+    err: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            box.append(fn())
+        except Exception as exc:  # noqa: BLE001 — re-raised on the caller thread
+            err.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(max(0.0, float(timeout)))
+    if worker.is_alive():
+        if cancel is not None:
+            try:
+                cancel()
+            except OSError:
+                pass
+        raise timed_out or RavenIpcError('IPC_FRAME', IPC_IO_TIMEOUT_MESSAGE)
+    if err:
+        raise err[0]
+    return box[0]
+
+
 def _transact_file(
     req: Mapping[str, object],
     handle: BinaryIO,
     timeout: float,
 ) -> dict[str, object]:
-    del timeout
-    frame = encode_request(req)
-    handle.write(frame)
-    handle.flush()
-    header = _read_exact_file(handle, 4)
-    n = int.from_bytes(header, 'big')
-    if n == 0 or n > MAX_IPC_FRAME:
-        raise RavenIpcError('IPC_FRAME', 'IPC_FRAME')
-    body = _read_exact_file(handle, n)
-    return decode_response_frame(header + body)
+    """Named-pipe transact. ``timeout`` is honored (same contract as UDS)."""
+
+    def body() -> dict[str, object]:
+        frame = encode_request(req)
+        handle.write(frame)
+        handle.flush()
+        header = _read_exact_file(handle, 4)
+        n = int.from_bytes(header, 'big')
+        if n == 0 or n > MAX_IPC_FRAME:
+            raise RavenIpcError('IPC_FRAME', 'IPC_FRAME')
+        payload = _read_exact_file(handle, n)
+        return decode_response_frame(header + payload)
+
+    return _run_with_timeout(
+        timeout,
+        body,
+        cancel=handle.close,
+        timed_out=RavenIpcError('IPC_FRAME', IPC_IO_TIMEOUT_MESSAGE),
+    )
 
 
 def _recv_exact_sock(sock: socket.socket, n: int) -> bytes:
