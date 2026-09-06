@@ -104,13 +104,23 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _same_regular_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+def _same_regular_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    """Same regular file by inode/size/nlink — no timestamps.
+
+    Windows ``lstat`` and ``fstat`` clocks disagree on unchanged files.
+    """
     return (
         _same_file_identity(left, right)
         and stat.S_ISREG(right.st_mode)
         and not _is_link_or_reparse(right)
         and right.st_nlink == 1
         and left.st_size == right.st_size
+    )
+
+
+def _same_regular_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        _same_regular_identity(left, right)
         and left.st_mtime_ns == right.st_mtime_ns
         and left.st_ctime_ns == right.st_ctime_ns
     )
@@ -156,7 +166,7 @@ def _read_stable_regular_file(
         except OSError:
             return None, 0
         if not (
-            _same_regular_snapshot(expected, opened)
+            _same_regular_identity(expected, opened)
             and _same_regular_snapshot(expected, before)
         ):
             return None, 0
@@ -177,8 +187,8 @@ def _read_stable_regular_file(
             return None, consumed
         if not (
             len(data) == expected.st_size
-            and _same_regular_snapshot(expected, after_fd)
-            and _same_regular_snapshot(expected, after_path)
+            and _same_regular_snapshot(opened, after_fd)
+            and _same_regular_snapshot(before, after_path)
         ):
             return None, consumed
         return bytes(data), consumed

@@ -1033,16 +1033,16 @@ def unit_tests() -> None:
             )
             return path
 
-        write_event(alpha_events, 'event-001.json', 'alpha', 1, 'oldest')
+        write_event(alpha_events, 'event-001.json', 'alpha', 1.0, 'oldest')
         write_event(
             alpha_events,
             'event-003.json',
             'alpha',
-            3,
+            3.0,
             '\x1b[31mnewest\n\u202e' + ('x' * 500),
             private='must not be projected',
         )
-        write_event(beta_events, 'event-002.json', 'beta', 2, 'middle')
+        write_event(beta_events, 'event-002.json', 'beta', 2.0, 'middle')
 
         newest = recent_memory.recent_events(limit=2)
         check(
