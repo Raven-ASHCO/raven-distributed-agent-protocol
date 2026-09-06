@@ -846,7 +846,9 @@ def unit_tests() -> None:
                 bearer_http = 'HTTPS' in str(exc) and 'Do not pass --open' in str(exc)
             return missing_pin, bearer_http
 
-        missing_pin_ok, bearer_http_ok = asyncio.run(exercise_send_first_run_errors())
+        missing_pin_ok, bearer_http_ok = __import__('asyncio').run(
+            exercise_send_first_run_errors()
+        )
         check(
             'send_task names the next fix for missing pin and Bearer-over-HTTP',
             missing_pin_ok and bearer_http_ok,
