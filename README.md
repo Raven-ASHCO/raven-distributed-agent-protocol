@@ -81,6 +81,7 @@ a step. OPEN MODE stays off.
 | 6. Trust | `RDAP_HOME=… ./rdap trust '<complete invite>'` | `trusted` after live card check |
 | 7. Ping | `RDAP_HOME=… ./rdap ping --name <peer>` | `alive` |
 | 8. Ask | `RDAP_HOME=… ./rdap ask 'Reply exactly: RAVEN_A2A_OK_…' --name <peer>` | `completed task` + marker |
+| 9. Cancel (optional) | owner-signed Cancel RPC only | caller may see force-saved `CANCELED`; other peers task-not-found; brain may still COMPLETE — §9.1 not closed |
 
 Before step 8, also confirm:
 
