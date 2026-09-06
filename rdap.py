@@ -848,7 +848,15 @@ def cmd_start(args) -> None:
             _api_key=custom_llm_key,
         )
     except ValueError as exc:
-        sys.exit(f'invalid LLM configuration: {exc}')
+        from team_agents.runtime_hints import hint_llm_config
+
+        sys.exit(hint_llm_config(selected_provider, detail=str(exc)))
+    try:
+        selected_llm.require_ready()
+    except ValueError as exc:
+        from team_agents.runtime_hints import hint_llm_config
+
+        sys.exit(hint_llm_config(selected_provider, detail=str(exc)))
     cfg = NodeConfig(
         name=st['name'],
         role=st.get('role', ''),
@@ -872,6 +880,9 @@ def cmd_start(args) -> None:
         os.environ['RDAP_POLL'] = str(args.poll)
     if args.open:
         print('! ! ! OPEN MODE EXPLICITLY ENABLED: unsigned LAN tasks will execute ! ! !')
+    from team_agents.runtime_hints import warn_unsigned_env_without_flag
+
+    warn_unsigned_env_without_flag(open_flag=bool(args.open))
     if args.experimental_plaintext_mailbox:
         print('! EXPERIMENTAL PLAINTEXT MAILBOX ENABLED — no Raven E2EE/confidentiality')
     try:
@@ -879,9 +890,13 @@ def cmd_start(args) -> None:
     except RuntimeError as exc:
         sys.exit(f'{exc}')
     except (PermissionError, ValueError) as exc:
-        from team_agents.runtime_hints import hint_missing_keys
+        from team_agents.runtime_hints import format_serve_failure
 
-        sys.exit(f'{exc}. {hint_missing_keys(str(repo / ".team" / "keys"))}')
+        sys.exit(format_serve_failure(
+            exc,
+            keys_dir=str(repo / '.team' / 'keys'),
+            provider=selected_provider,
+        ))
 
 
 def cmd_model(args) -> None:
@@ -1263,9 +1278,10 @@ def cmd_say(args) -> None:
                 )
             except Exception as exc:
                 from team_agents.client import UnsafeBearerTransportError
+                from team_agents.runtime_hints import hint_bearer_http
 
                 if isinstance(exc, UnsafeBearerTransportError):
-                    sys.exit(f'refusing direct Bearer transport: {exc}')
+                    sys.exit(hint_bearer_http())
                 raise
             if info is not None:
                 mb = info.get('mailbox')
@@ -1413,6 +1429,8 @@ def _probe(
         validate_address_public_key,
     )
 
+    node_url = str(url or '')
+    _probe.last_hint = ''
     try:
         node_url = _validated_node_url(url)
         base = node_url.rstrip('/') + '/'
@@ -1461,7 +1479,10 @@ def _probe(
     except UnsafeBearerTransportError:
         # This is a local policy violation, not ordinary reachability failure.
         raise
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        from team_agents.runtime_hints import format_client_failure
+
+        _probe.last_hint = format_client_failure(exc, node_url)
         if raise_errors:
             raise
         return None
@@ -1493,13 +1514,17 @@ def cmd_ping(args) -> None:
             )
         except Exception as exc:
             from team_agents.client import UnsafeBearerTransportError
+            from team_agents.runtime_hints import hint_bearer_http
 
             if isinstance(exc, UnsafeBearerTransportError):
-                print(f'✗ {name}: {exc}')
+                print(f'✗ {name}: {hint_bearer_http()}')
                 return False
             raise
         if not info:
-            print(f'✗ {name}: unreachable or pinned identity/auth did not verify')
+            hint = getattr(_probe, 'last_hint', '') or (
+                'unreachable or pinned identity/auth did not verify'
+            )
+            print(f'✗ {name}: {hint}')
             return False
         pol = info.get('policy', {})
         print(f'✔ alive: {info["display"]}')
@@ -1605,6 +1630,10 @@ def cmd_ask(args) -> None:
     url = explicit_url or (target or {}).get('url', '')
     peer_addr = (target or {}).get('address', '')
     peer_pub = (target or {}).get('public_key', '')
+    if not peer_addr or not peer_pub:
+        from team_agents.runtime_hints import hint_missing_peer_pin
+
+        sys.exit(hint_missing_peer_pin())
     repo = Path(st.get('repo') or BASE / 'team-repo')
     idn = RavenIdentity.load_or_create(repo / '.team' / 'keys')
 
@@ -1641,9 +1670,10 @@ def cmd_ask(args) -> None:
             )
         except Exception as exc:
             from team_agents.client import UnsafeBearerTransportError
+            from team_agents.runtime_hints import hint_bearer_http
 
             if isinstance(exc, UnsafeBearerTransportError):
-                sys.exit(f'refusing direct Bearer transport: {exc}')
+                sys.exit(hint_bearer_http())
             raise
         if info is not None:
             mb = info.get('mailbox')
@@ -1661,7 +1691,7 @@ def cmd_ask(args) -> None:
                     updates=teammate_updates,
                 )
                 target.update(copy.deepcopy(teammate_updates))
-            print(f'✔ {target_name} alive — sending task …')
+            print(f'✔ {target_name} alive — sending task (waiting up to 90s) …')
             try:
                 result = asyncio.run(send_task(
                     url,
@@ -1672,11 +1702,17 @@ def cmd_ask(args) -> None:
                     token_file=args.token_file,
                     timeout=90,
                 ))
-            except (TimeoutError, ConnectionError, RuntimeError) as exc:
+            except (
+                TimeoutError,
+                ConnectionError,
+                RuntimeError,
+                ValueError,
+            ) as exc:
                 sys.exit(str(exc))
             print(result)
             return
-        ui.err('[direct] unreachable')
+        hint = getattr(_probe, 'last_hint', '') or 'peer did not verify'
+        ui.err(f'[direct] {hint}')
 
     # T3 — raven swarm offline mailbox (task lands in THEIR store)
     if args.experimental_plaintext_mailbox and not args.git_only:
@@ -1744,6 +1780,10 @@ def _http_health(url: str, timeout: float = 3.0) -> tuple[bool, str]:
     base = str(url).rstrip('/')
     try:
         response = httpx.get(base + '/health', timeout=timeout, trust_env=False)
+    except httpx.TimeoutException:
+        from team_agents.runtime_hints import hint_timeout
+
+        return False, hint_timeout(base)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)[:180]
     body = (response.text or '').strip()
@@ -1783,6 +1823,8 @@ def cmd_health(args) -> None:
         return
     from team_agents.runtime_hints import hint_unreachable
 
+    if 'next:' in detail:
+        sys.exit(f'✗ /health failed: {detail}')
     sys.exit(f'✗ /health failed: {detail}\n       next: {hint_unreachable(url)}')
 
 
@@ -2289,8 +2331,10 @@ def cmd_do(args) -> None:
     try:
         for mate in targets.values():
             require_secure_bearer_transport(str(mate['url']), token)
-    except UnsafeBearerTransportError as exc:
-        sys.exit(str(exc))
+    except UnsafeBearerTransportError:
+        from team_agents.runtime_hints import hint_bearer_http
+
+        sys.exit(hint_bearer_http())
 
     async def _run():
         import asyncio as _aio
@@ -2345,8 +2389,10 @@ def cmd_ls(args) -> None:
         for mate in mates.values():
             if mate.get('url'):
                 require_secure_bearer_transport(str(mate['url']), token)
-    except UnsafeBearerTransportError as exc:
-        sys.exit(str(exc))
+    except UnsafeBearerTransportError:
+        from team_agents.runtime_hints import hint_bearer_http
+
+        sys.exit(hint_bearer_http())
     headers = {'Authorization': f'Bearer {token}'} if token else None
     for nm, m in sorted(mates.items()):
         url = m.get('url', '')
@@ -2408,8 +2454,10 @@ def cmd_watch(args) -> None:
         for mate in st.get('teammates', {}).values():
             if mate.get('url'):
                 require_secure_bearer_transport(str(mate['url']), token)
-    except UnsafeBearerTransportError as exc:
-        sys.exit(str(exc))
+    except UnsafeBearerTransportError:
+        from team_agents.runtime_hints import hint_bearer_http
+
+        sys.exit(hint_bearer_http())
     headers = {'Authorization': f'Bearer {token}'} if token else None
 
     def fetch(mate: dict):

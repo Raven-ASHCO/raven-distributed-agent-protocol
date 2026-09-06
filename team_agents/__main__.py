@@ -38,9 +38,13 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 
 def _apply_common(cfg: NodeConfig, args: argparse.Namespace) -> NodeConfig:
+    from .runtime_hints import warn_unsigned_env_without_flag
+
     cfg.repo_path = Path(args.repo).resolve()
     if args.peers:
         cfg.trusted_peers = load_trusted_peers(Path(args.peers))
+    # CLI wins: TEAM_REQUIRE_SIGNED=0 must not open a node without --open.
+    warn_unsigned_env_without_flag(open_flag=bool(args.open))
     cfg.require_signed_tasks = not args.open
     return cfg
 
@@ -49,47 +53,58 @@ def cmd_serve(args: argparse.Namespace) -> None:
     from .server import serve
 
     from .config import LLMConfig, Skill, resolve_custom_llm_api_key
+    from .runtime_hints import format_serve_failure
 
-    cfg = NodeConfig.from_env()
-    cfg.name = args.name or cfg.name
-    cfg.role = args.role or ''
-    cfg.host = args.host
-    cfg.port = args.port
-    if args.url:
-        cfg.public_url = args.url
-    if args.token or args.token_file:
-        from .client import resolve_bearer_token
-
-        cfg.auth_token = resolve_bearer_token(args.token, args.token_file)
-    cfg.enable_experimental_mailbox = args.experimental_plaintext_mailbox
-    if args.allow_shell:
-        cfg.allow_shell = True
-    for spec in args.skill or []:
-        sid, name, desc = (spec.split(':', 2) + ['', ''])[:3]
-        cfg.skills.append(Skill(id=sid, name=name or sid, description=desc))
-    provider_overridden = bool(str(args.provider).strip())
-    selected_provider = str(
-        args.provider or cfg.llm.provider
-    ).strip().lower()
-    cfg.llm = LLMConfig(
-        provider=selected_provider,
-        model=(
-            args.model
-            or ('' if provider_overridden else cfg.llm.model)
-        ),
-        base_url=(
-            args.base_url
-            or ('' if provider_overridden else cfg.llm.base_url)
-        ),
-        _api_key=(
-            resolve_custom_llm_api_key() if selected_provider == 'custom' else ''
-        ),
-    )
-    _apply_common(cfg, args)
     try:
+        cfg = NodeConfig.from_env()
+        cfg.name = args.name or cfg.name
+        cfg.role = args.role or ''
+        cfg.host = args.host
+        cfg.port = args.port
+        if args.url:
+            cfg.public_url = args.url
+        if args.token or args.token_file:
+            from .client import resolve_bearer_token
+
+            cfg.auth_token = resolve_bearer_token(args.token, args.token_file)
+        cfg.enable_experimental_mailbox = args.experimental_plaintext_mailbox
+        if args.allow_shell:
+            cfg.allow_shell = True
+        for spec in args.skill or []:
+            sid, name, desc = (spec.split(':', 2) + ['', ''])[:3]
+            cfg.skills.append(Skill(id=sid, name=name or sid, description=desc))
+        provider_overridden = bool(str(args.provider).strip())
+        selected_provider = str(
+            args.provider or cfg.llm.provider
+        ).strip().lower()
+        cfg.llm = LLMConfig(
+            provider=selected_provider,
+            model=(
+                args.model
+                or ('' if provider_overridden else cfg.llm.model)
+            ),
+            base_url=(
+                args.base_url
+                or ('' if provider_overridden else cfg.llm.base_url)
+            ),
+            _api_key=(
+                resolve_custom_llm_api_key() if selected_provider == 'custom' else ''
+            ),
+        )
+        cfg.llm.require_ready()
+        _apply_common(cfg, args)
         serve(cfg)
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        keys_dir = str(Path(getattr(args, 'repo', '.') or '.').resolve() / '.team' / 'keys')
+        raise SystemExit(
+            format_serve_failure(
+                exc,
+                keys_dir=keys_dir,
+                provider=str(getattr(args, 'provider', '') or ''),
+            )
+        ) from exc
 
 
 def cmd_id(args: argparse.Namespace) -> None:
@@ -98,9 +113,17 @@ def cmd_id(args: argparse.Namespace) -> None:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    from .client import send_task
+    from .client import (
+        CardVerificationError,
+        UnsafeBearerTransportError,
+        send_task,
+    )
 
     identity = RavenIdentity.load_or_create(args.keys_dir) if args.keys_dir else None
+    print(
+        f'* sending signed task to {args.url} (timeout 180s) …',
+        flush=True,
+    )
     try:
         result = __import__('asyncio').run(
             send_task(
@@ -112,7 +135,14 @@ def cmd_send(args: argparse.Namespace) -> None:
                 token_file=args.token_file,
             )
         )
-    except (TimeoutError, ConnectionError, RuntimeError) as exc:
+    except (
+        TimeoutError,
+        ConnectionError,
+        RuntimeError,
+        ValueError,
+        CardVerificationError,
+        UnsafeBearerTransportError,
+    ) as exc:
         raise SystemExit(str(exc)) from exc
     print(result)
 

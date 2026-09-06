@@ -1053,7 +1053,18 @@ def serve(config: NodeConfig) -> None:
         raise RuntimeError(hint_port_busy(requested_port)) from exc
 
     try:
-        app = build_app(config)
+        try:
+            app = build_app(config)
+        except (PermissionError, ValueError) as exc:
+            from .runtime_hints import format_serve_failure
+
+            raise RuntimeError(
+                format_serve_failure(
+                    exc,
+                    keys_dir=str(config.keys_dir),
+                    provider=config.llm.provider,
+                )
+            ) from exc
         rav: RavenIdentity = app.state.raven
         cfg: NodeConfig = app.state.config
         print(  # noqa: T201
@@ -1080,19 +1091,13 @@ def serve(config: NodeConfig) -> None:
             f'peers={len(cfg.trusted_peers)}',
             flush=True,
         )
-        health_url = f'{cfg.resolved_public_url()}/health'
-        print(  # noqa: T201
-            f'* [{cfg.name}] health: {health_url}   '
-            f'check with `rdap health --url {cfg.resolved_public_url()}` '
-            f'or `curl -sS {health_url}`',
-            flush=True,
-        )
-        print(  # noqa: T201
-            f'* [{cfg.name}] keep this process running. In another terminal: '
-            f'`rdap invite --ip <this-host> --port {cfg.port}` then '
-            '`rdap trust` / `rdap ping` / `rdap ask`. Do not pass --open.',
-            flush=True,
-        )
+        from .runtime_hints import first_run_next_steps
+
+        print(first_run_next_steps(  # noqa: T201
+            public_url=cfg.resolved_public_url(),
+            advertised_host=cfg.advertised_host or cfg.host,
+            port=cfg.port,
+        ), flush=True)
 
         # Pass the already-bound socket object through Uvicorn's public Server
         # API.  ``uvicorn.run(..., fd=...)`` reconstructs it with

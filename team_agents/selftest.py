@@ -733,6 +733,145 @@ def unit_tests() -> None:
             f'rc={health_result.returncode} out={health_out[-500:]!r}',
         )
 
+        from team_agents.runtime_hints import (
+            first_run_next_steps,
+            format_client_failure,
+            format_serve_failure,
+            hint_bearer_http,
+            hint_llm_config,
+            hint_missing_keys,
+            hint_missing_peer_pin,
+            hint_port_busy,
+        )
+        from team_agents.__main__ import _apply_common
+        from team_agents.client import UnsafeBearerTransportError, send_task
+        from team_agents.config import LLMConfig
+
+        next_steps = first_run_next_steps(
+            public_url='http://127.0.0.1:9001',
+            advertised_host='0.0.0.0',
+            port=9001,
+        )
+        check(
+            'successful start prints exact health/invite/trust/ask commands',
+            'health --url http://127.0.0.1:9001' in next_steps
+            and 'invite --ip 127.0.0.1 --port 9001' in next_steps
+            and 'trust' in next_steps
+            and 'ask' in next_steps
+            and next_steps.count('--open') == 1
+            and 'do not pass --open' in next_steps,
+            next_steps,
+        )
+        check(
+            'first-run failure hints name the next fix and never recommend --open',
+            'rdap start' in hint_port_busy(9001)
+            and 'rdap init' in hint_missing_keys('/tmp/keys')
+            and 'OPENAI_API_KEY' in hint_llm_config('openai')
+            and 'HTTPS' in hint_bearer_http()
+            and 'trust' in hint_missing_peer_pin()
+            and '--open' not in hint_port_busy(9001)
+            and '--open' not in hint_missing_keys('/tmp/keys')
+            and 'Do not pass --open' in hint_bearer_http()
+            and 'next:' in format_serve_failure(
+                ValueError('openai requires OPENAI_API_KEY in the environment'),
+                keys_dir='/tmp/keys',
+                provider='openai',
+            )
+            and 'timed out' in format_client_failure(
+                TimeoutError('timed out'),
+                'http://127.0.0.1:9001',
+            ),
+        )
+
+        saved_signed = os.environ.get('TEAM_REQUIRE_SIGNED')
+        os.environ['TEAM_REQUIRE_SIGNED'] = '0'
+        try:
+            env_cfg = NodeConfig.from_env()
+            env_opened = env_cfg.require_signed_tasks is False
+            signed_again = _apply_common(
+                env_cfg,
+                type('Args', (), {'repo': '.', 'peers': '', 'open': False})(),
+            )
+            stayed_signed = signed_again.require_signed_tasks is True
+        finally:
+            if saved_signed is None:
+                os.environ.pop('TEAM_REQUIRE_SIGNED', None)
+            else:
+                os.environ['TEAM_REQUIRE_SIGNED'] = saved_signed
+        check(
+            'serve CLI ignores TEAM_REQUIRE_SIGNED=0 unless --open is passed',
+            env_opened and stayed_signed,
+        )
+
+        hosted_ready_refused = False
+        saved_groq = os.environ.get('GROQ_API_KEY')
+        os.environ.pop('GROQ_API_KEY', None)
+        try:
+            LLMConfig(provider='groq').require_ready()
+        except ValueError as exc:
+            hosted_ready_refused = 'GROQ_API_KEY' in str(exc)
+        finally:
+            if saved_groq is None:
+                os.environ.pop('GROQ_API_KEY', None)
+            else:
+                os.environ['GROQ_API_KEY'] = saved_groq
+        check(
+            'hosted LLM start fails closed without the provider key',
+            hosted_ready_refused,
+        )
+
+        async def exercise_send_first_run_errors():
+            missing_pin = False
+            bearer_http = False
+            try:
+                await send_task(
+                    'http://127.0.0.1:9',
+                    'hello',
+                    identity=alice,
+                    expected_peer_address='',
+                    expected_peer_public_key='',
+                )
+            except ValueError as exc:
+                missing_pin = 'trust' in str(exc)
+            try:
+                await send_task(
+                    'http://127.0.0.1:9',
+                    'hello',
+                    identity=alice,
+                    expected_peer_address=bob.address,
+                    expected_peer_public_key=bob.public_hex,
+                    bearer_token='secret',
+                )
+            except UnsafeBearerTransportError as exc:
+                bearer_http = 'HTTPS' in str(exc) and 'Do not pass --open' in str(exc)
+            return missing_pin, bearer_http
+
+        missing_pin_ok, bearer_http_ok = asyncio.run(exercise_send_first_run_errors())
+        check(
+            'send_task names the next fix for missing pin and Bearer-over-HTTP',
+            missing_pin_ok and bearer_http_ok,
+        )
+
+        readme_text = (PKG_ROOT / 'README.md').read_text(encoding='utf-8')
+        revocation_text = (PKG_ROOT / 'docs' / 'rdap-revocation.md').read_text(
+            encoding='utf-8'
+        )
+        lifecycle_text = (PKG_ROOT / 'docs' / 'rdap-task-lifecycle.md').read_text(
+            encoding='utf-8'
+        )
+        doctor_src = (PKG_ROOT / 'rdap.py').read_text(encoding='utf-8')
+        check(
+            'Role #13 must-fixes remain (revocation bridge, cancel §9.1, first-ask, doctor)',
+            '## First-ask checklist' in readme_text
+            and 'docs/rdap-revocation.md' in readme_text
+            and '§9.1' in readme_text
+            and 'silent empty' in revocation_text
+            and 'revocations_file' in revocation_text
+            and '9.1' in lifecycle_text
+            and 'revocations_file is unset' in doctor_src
+            and 'TEAM_REVOCATIONS' in doctor_src,
+        )
+
         import rdap as rdap_cli
 
         no_route_refused = False

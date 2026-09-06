@@ -182,6 +182,15 @@ class LLMConfig:
         env_name = LLM_PROVIDER_KEY_ENVS.get(self.provider)
         return os.environ.get(env_name, '') if env_name else ''
 
+    def require_ready(self) -> None:
+        """Fail before bind if a hosted brain is selected without its key."""
+        self._validate_endpoint()
+        if self.provider in LLM_PROVIDER_KEY_ENVS and not self.api_key():
+            env_name = LLM_PROVIDER_KEY_ENVS[self.provider]
+            raise ValueError(
+                f'{self.provider} requires {env_name} in the environment'
+            )
+
 
 @dataclass
 class Skill:

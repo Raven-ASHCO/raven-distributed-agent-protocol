@@ -330,9 +330,25 @@ async def send_task(
 ) -> str:
     if identity is None:
         raise ValueError('a sender Raven identity is required')
-    validate_address_public_key(expected_peer_address, expected_peer_public_key)
+    if not str(expected_peer_address or '').strip() or not str(
+        expected_peer_public_key or ''
+    ).strip():
+        from .runtime_hints import hint_missing_peer_pin
+
+        raise ValueError(hint_missing_peer_pin())
+    try:
+        validate_address_public_key(expected_peer_address, expected_peer_public_key)
+    except ValueError as exc:
+        from .runtime_hints import hint_missing_peer_pin
+
+        raise ValueError(f'{exc}. {hint_missing_peer_pin()}') from exc
     token = resolve_bearer_token(bearer_token, token_file)
-    require_secure_bearer_transport(url, token)
+    try:
+        require_secure_bearer_transport(url, token)
+    except UnsafeBearerTransportError as exc:
+        from .runtime_hints import hint_bearer_http
+
+        raise UnsafeBearerTransportError(hint_bearer_http()) from exc
     headers = {'Authorization': f'Bearer {token}'} if token else None
     base_url = url.rstrip('/') + '/'
     try:

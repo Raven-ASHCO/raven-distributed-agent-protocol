@@ -208,6 +208,7 @@ def build_brain(
     toolbox: ToolBox,
     cancel_event: asyncio.Event | None = None,
 ) -> Brain:
+    config.llm.require_ready()
     if config.llm.provider in {'openai', 'groq', 'openrouter', 'ollama', 'custom'}:
         return OpenAIBrain(config, config.llm, toolbox, cancel_event)
     return EchoBrain(config, toolbox.memory)
