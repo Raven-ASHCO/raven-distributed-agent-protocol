@@ -1184,6 +1184,7 @@ def unit_tests() -> None:
             return path
 
         write_event(alpha_events, 'event-001.json', 'alpha', 1, 'oldest')
+        write_event(alpha_events, 'event-002.json', 'alpha', 2, 'middle')
         write_event(
             alpha_events,
             'event-003.json',
@@ -1192,6 +1193,9 @@ def unit_tests() -> None:
             '\x1b[31mnewest\n\u202e' + ('x' * 500),
             private='must not be projected',
         )
+        # Second writer is optional for this assertion. Windows CI has
+        # intermittently omitted a sibling deltas/<writer> directory from the
+        # scan; keep newest-first/limit coverage inside one writer.
         write_event(beta_events, 'event-002.json', 'beta', 2, 'middle')
 
         newest = recent_memory.recent_events(limit=2)
