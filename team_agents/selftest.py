@@ -235,6 +235,19 @@ def unit_tests() -> None:
             check('ash pin with mismatched device-like key rejected', False)
         except ValueError:
             check('ash pin with mismatched device-like key rejected', True)
+        import re as _re
+        ipc_hits = []
+        for rel in ('rdap.py', 'team_agents/raven_bind.py',
+                    'team_agents/client.py', 'team_agents/server.py'):
+            text = (PKG_ROOT / rel).read_text(encoding='utf-8')
+            for token in ('EnqueueSealed', 'LanDial'):
+                if _re.search(rf'(?:import\s+.*{token}|{token}\s*[\(\.])', text):
+                    ipc_hits.append(f'{rel}:{token}')
+        check(
+            'M1 bind ships no EnqueueSealed/LanDial client',
+            ipc_hits == [],
+            ', '.join(ipc_hits),
+        )
 
         from team_agents.config import NodeConfig, load_trusted_peers
 

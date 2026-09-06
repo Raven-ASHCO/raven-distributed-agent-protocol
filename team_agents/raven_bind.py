@@ -1,5 +1,8 @@
 """M1 public same-RVN1 bind (ADR 0004 D3). NON-RELEASE / HOLD.
 
+Identity-only. The broader encrypted M1–M3 code gate is CLOSED: this module
+must not grow an EnqueueSealed / LanDial / seal client.
+
 Import **public** raven-node / ash whoami material so RDAP's principal is the
 same user-identity RVN1 as the local node. This is not a signing-key import,
 not ATSAM, and not a confidential carrier.
