@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """RDAP wizard — the only file you need.
 
-    ./rdap init          set up this Mac's agent (asks your agent's name)
+    ./rdap try           prove this machine works (same selftest as CI)
+    ./rdap doctor        check Python, Git, deps, and signed-by-default
+    ./rdap init          set up this machine's agent
     ./rdap trust         register a teammate by pasting their INVITE line
     ./rdap start         run your agent node (explicit, stable IP/port)
     ./rdap ask "task"    delegate a signed task to a teammate
 
-No flags needed for the happy path. Advanced flags still exist in
-`python -m team_agents --help`.
+On Windows use ``rdap.cmd`` instead of ``./rdap``. OPEN MODE (``--open`` /
+``TEAM_REQUIRE_SIGNED=0``) is never the default. Advanced flags still exist
+in ``python -m team_agents --help``.
 """
 
 from __future__ import annotations
@@ -33,6 +36,29 @@ BASE = Path(os.environ.get('RDAP_HOME', str(HERE))).resolve()
 STATE_FILE = BASE / 'rdap.json'
 PEERS_FILE = BASE / 'peers.json'
 STATE_LOCK_FILE = BASE / '.rdap-state.lock'
+DOCTOR_OK = 'RDAP_DOCTOR_OK'
+TRY_OK = 'RDAP_TRY_OK'
+_REQUIRED_IMPORTS = ('a2a', 'uvicorn', 'starlette', 'cryptography', 'httpx', 'zeroconf')
+
+
+def _cli() -> str:
+    """Platform-correct launcher name for operator-facing hints."""
+    return 'rdap.cmd' if os.name == 'nt' else './rdap'
+
+
+def _need_init() -> None:
+    sys.exit(
+        f'this RDAP home is not initialized. Run `{_cli()} init --name you` first '
+        f'(or `{_cli()} try` to verify this machine without initializing).'
+    )
+
+
+def _git_missing() -> None:
+    sys.exit(
+        'Git is not installed or not on PATH. Install Git '
+        '(https://git-scm.com/downloads), then re-run this command '
+        f'or `{_cli()} doctor`.'
+    )
 
 # open-source-first brain catalog
 MODEL_MENU = [
@@ -258,7 +284,7 @@ def _configure_relay_git_identity(repo: Path) -> None:
                 text=True,
             )
     except FileNotFoundError:
-        sys.exit('RDAP initialization failed: Git is not installed or not on PATH')
+        _git_missing()
     except subprocess.CalledProcessError as exc:
         detail = ((exc.stderr or '') + (exc.stdout or '')).strip()[-1000:]
         sys.exit(f'RDAP Git identity configuration failed: {detail or exc}')
@@ -316,7 +342,7 @@ def _cmd_init_locked(args) -> None:
                 text=True,
             )
         except FileNotFoundError:
-            sys.exit('RDAP initialization failed: Git is not installed or not on PATH')
+            _git_missing()
         except _sp.CalledProcessError as exc:
             detail = ((exc.stderr or '') + (exc.stdout or '')).strip()[-1000:]
             sys.exit(f'RDAP Git initialization failed: {detail or exc}')
@@ -346,7 +372,7 @@ def _cmd_init_locked(args) -> None:
             stderr=_sp.DEVNULL,
         ).returncode == 0
     except FileNotFoundError:
-        sys.exit('RDAP initialization failed: Git is not installed or not on PATH')
+        _git_missing()
 
     if not has_head:
         unexpected = {
@@ -417,7 +443,7 @@ def _cmd_init_locked(args) -> None:
     if args.internet is not None:
         has_net = args.internet
     elif sys.stdin.isatty():
-        ans = input('does this Mac have internet access? [Y/n]: ').strip().lower()
+        ans = input('Does this machine have internet access? [Y/n]: ').strip().lower()
         has_net = ans not in ('n', 'no')
     else:
         has_net = True   # assume online when run from scripts
@@ -442,8 +468,10 @@ def _cmd_init_locked(args) -> None:
     ], title=f'{name} is ready')
     print(f'\n{ui.bold("share this invite with teammates:")}')
     print(ui.cyan(invite_line(st)))
+    print(f'\nnext: `{_cli()} start --provider echo`  (no API key, signed by default)')
+    print(f'      `{_cli()} invite --ip <this-host> --port 9001` after the node is up')
     if not st.get('llm'):
-        print("\npick a brain now:  ./rdap model")
+        print(f'      `{_cli()} model` only if you want a hosted/local LLM')
 
 
 def invite_line(st: dict) -> str:
@@ -458,7 +486,7 @@ def cmd_relay_setup(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     remote_url = str(args.remote_url)
     if (
         not remote_url
@@ -758,7 +786,7 @@ def cmd_start(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
 
     repo = Path(st.get('repo') or BASE / 'team-repo')
     from team_agents.raven_identity import validate_address_public_key
@@ -795,7 +823,8 @@ def cmd_start(args) -> None:
     if not advertised_ip:
         sys.exit(
             'cannot determine a cross-device address (no default route); '
-            'pass this device\'s LAN address with `./rdap start --ip <LAN-IP>`'
+            f'pass this device\'s address with `{_cli()} start --ip <LAN-IP>` '
+            f'(use 127.0.0.1 for a same-machine demo)'
         )
     try:
         advertised_ip = _validated_advertised_host(advertised_ip)
@@ -845,7 +874,14 @@ def cmd_start(args) -> None:
         print('! ! ! OPEN MODE EXPLICITLY ENABLED: unsigned LAN tasks will execute ! ! !')
     if args.experimental_plaintext_mailbox:
         print('! EXPERIMENTAL PLAINTEXT MAILBOX ENABLED — no Raven E2EE/confidentiality')
-    serve(cfg)
+    try:
+        serve(cfg)
+    except RuntimeError as exc:
+        sys.exit(f'{exc}')
+    except (PermissionError, ValueError) as exc:
+        from team_agents.runtime_hints import hint_missing_keys
+
+        sys.exit(f'{exc}. {hint_missing_keys(str(repo / ".team" / "keys"))}')
 
 
 def cmd_model(args) -> None:
@@ -855,7 +891,7 @@ def cmd_model(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
 
     # ---- interactive menu ------------------------------------------------
     if not args.provider and not args.list:
@@ -886,7 +922,10 @@ def cmd_model(args) -> None:
                 raise ValueError
             provider, model, base_url, envkey = options[selection - 1]
         except (ValueError, IndexError):
-            sys.exit('bad choice')
+            sys.exit(
+                'invalid menu choice — enter a listed number, press Enter to keep '
+                f'the current brain, or run `{_cli()} model --list`'
+            )
         if envkey:
             import os
 
@@ -931,13 +970,13 @@ def cmd_model(args) -> None:
     print(f"✔ {st['name']} will now think with "
           f"{st['llm']['provider']}/{st['llm']['model'] or '-'}"
           f"{' @ ' + st['llm']['base_url'] if st['llm']['base_url'] else ''}")
-    print('restart the node (`./rdap start`) to apply.')
+    print(f'restart the node (`{_cli()} start`) to apply.')
 
 
 def cmd_invite(args) -> None:
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     line = invite_line(st)
     url = ''
     mates = st.get('teammates', {})
@@ -946,7 +985,8 @@ def cmd_invite(args) -> None:
         if not advertised_ip:
             sys.exit(
                 'cannot determine a cross-device address (no default route); '
-                'pass `./rdap invite --ip <LAN-IP> --port <PORT>`'
+                f'pass `{_cli()} invite --ip <LAN-IP> --port <PORT>` '
+                '(use 127.0.0.1 for a same-machine demo)'
             )
         try:
             advertised_ip = _validated_advertised_host(advertised_ip)
@@ -987,7 +1027,10 @@ def cmd_discover(args) -> None:
         node['_display_addr'] = _terminal_safe(node.get('addr', ''), 24)
         nodes.append(node)
     if not nodes:
-        print('none found (other than you). is the other node running?')
+        print(
+            'none found (other than you). Start the other node first '
+            f'(`{_cli()} start --provider echo`), then retry.'
+        )
         return
     for i, n in enumerate(nodes, 1):
         print(
@@ -995,7 +1038,7 @@ def cmd_discover(args) -> None:
             f"{n['_display_addr'][:18]}…"
         )
     if not args.trust:
-        print('\ntrust one:  ./rdap discover --trust <number>')
+        print(f'\ntrust one:  {_cli()} discover --trust <number>')
         return
     if str(args.trust).casefold() == 'all':
         targets = nodes
@@ -1123,7 +1166,7 @@ def cmd_goal(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     chat = TeamChat(TeamMemory(Path(st.get('repo') or BASE / 'team-repo')))
     if args.text:
         chat.set_goal(args.text)
@@ -1148,7 +1191,7 @@ def cmd_say(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     mates = st.get('teammates', {})
     repo = Path(st.get('repo') or BASE / 'team-repo')
 
@@ -1307,7 +1350,7 @@ def cmd_chat(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     chat = TeamChat(TeamMemory(Path(st.get('repo') or BASE / 'team-repo')))
     goal = chat.get_goal()
     if goal:
@@ -1502,7 +1545,10 @@ def cmd_ping(args) -> None:
     if not expected_address or not expected_public_key:
         sys.exit('ping requires --name for a trusted teammate or both pinned identity flags')
     if not ping_one(display_name, url, expected_address, expected_public_key):
-        print('  checklist: is the node running, reachable, and using the expected token?')
+        print(
+            '  next: is the teammate node still running? On the same machine use '
+            '127.0.0.1 and the invite port. Then re-run this ping.'
+        )
         sys.exit(1)
 
 
@@ -1516,7 +1562,7 @@ def cmd_ask(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
 
     mates = st.get('teammates', {})
     target_name, target = None, None
@@ -1524,7 +1570,10 @@ def cmd_ask(args) -> None:
         target = mates.get(args.name)
         target_name = args.name
         if not target:
-            sys.exit(f'unknown teammate "{args.name}" — run `./rdap trust` first')
+            sys.exit(
+                f'unknown teammate "{args.name}" — run `{_cli()} trust \'<invite>\'` '
+                'first (the other node must already be running)'
+            )
         if not (target.get('url') or args.url) and not args.relay \
                 and not (args.experimental_plaintext_mailbox
                          and target.get('mailbox')):
@@ -1533,7 +1582,9 @@ def cmd_ask(args) -> None:
     elif len(mates) == 1:
         target_name, target = next(iter(mates.items()))
     elif not mates:
-        sys.exit('no teammates yet — run `./rdap trust` first')
+        sys.exit(
+            f'no teammates yet — start the other node, then run `{_cli()} trust \'<invite>\'`'
+        )
     else:
         print('multiple teammates — pick one:')
         for i, nm in enumerate(mates, 1):
@@ -1611,15 +1662,18 @@ def cmd_ask(args) -> None:
                 )
                 target.update(copy.deepcopy(teammate_updates))
             print(f'✔ {target_name} alive — sending task …')
-            result = asyncio.run(send_task(
-                url,
-                args.text,
-                identity=idn,
-                expected_peer_address=peer_addr,
-                expected_peer_public_key=peer_pub,
-                token_file=args.token_file,
-                timeout=90,
-            ))
+            try:
+                result = asyncio.run(send_task(
+                    url,
+                    args.text,
+                    identity=idn,
+                    expected_peer_address=peer_addr,
+                    expected_peer_public_key=peer_pub,
+                    token_file=args.token_file,
+                    timeout=90,
+                ))
+            except (TimeoutError, ConnectionError, RuntimeError) as exc:
+                sys.exit(str(exc))
             print(result)
             return
         ui.err('[direct] unreachable')
@@ -1684,16 +1738,394 @@ def cmd_ask(args) -> None:
 from team_agents.ui import ARROW, dim  # noqa: F401
 
 
+def _http_health(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    import httpx
+
+    base = str(url).rstrip('/')
+    try:
+        response = httpx.get(base + '/health', timeout=timeout, trust_env=False)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)[:180]
+    body = (response.text or '').strip()
+    if response.status_code == 200 and 'ok' in body.lower():
+        return True, body[:120]
+    return False, f'HTTP {response.status_code} {body[:80]}'
+
+
+def _port_status(host: str, port: int) -> str:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(0.4)
+    try:
+        probe.connect((host, port))
+        return 'occupied'
+    except OSError:
+        return 'free'
+    finally:
+        probe.close()
+
+
+def cmd_health(args) -> None:
+    raw = str(getattr(args, 'url', '') or '')
+    if not raw:
+        raw = f'http://127.0.0.1:{int(getattr(args, "port", 0) or 9001)}'
+    try:
+        url = _validated_node_url(raw)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    ok, detail = _http_health(url)
+    if ok:
+        print(f'✔ /health {detail}')
+        print(
+            f'next: `{_cli()} ping --name <peer>` then '
+            f'`{_cli()} ask \'Reply exactly: RDAP_OK\' --name <peer>`'
+        )
+        print(f'      first signed proof without a second device: `{_cli()} try`')
+        return
+    from team_agents.runtime_hints import hint_unreachable
+
+    sys.exit(f'✗ /health failed: {detail}\n       next: {hint_unreachable(url)}')
+
+
+def _run_doctor(url: str = '', port: int = 0) -> int:
+    """Check that this machine can run signed RDAP. Never enables OPEN MODE."""
+    import shutil
+    import subprocess
+
+    import team_agents.ui as ui
+    from team_agents.config import NodeConfig
+
+    failed = 0
+
+    def ok(name: str, detail: str = '') -> None:
+        suffix = f' — {detail}' if detail else ''
+        ui.ok(f'{name}{suffix}')
+
+    def bad(name: str, next_step: str) -> None:
+        nonlocal failed
+        failed += 1
+        ui.err(name)
+        print(f'       next: {next_step}')
+
+    def warn(name: str, next_step: str) -> None:
+        ui.warn(name)
+        print(f'       next: {next_step}')
+
+    print('RDAP doctor — checking this machine (OPEN MODE stays off)\n')
+
+    version = sys.version_info
+    if version >= (3, 10):
+        ok('python', f'{version.major}.{version.minor}.{version.micro} ({sys.executable})')
+    else:
+        bad(
+            f'python {version.major}.{version.minor} is too old',
+            'install Python 3.10 or newer, then re-run this command',
+        )
+
+    git = shutil.which('git')
+    if not git:
+        bad('git not on PATH', 'install Git from https://git-scm.com/downloads')
+    else:
+        try:
+            git_version = subprocess.run(
+                ['git', '--version'],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            detail = (git_version.stdout or git_version.stderr or git).strip()
+            if git_version.returncode == 0:
+                ok('git', detail)
+            else:
+                bad('git --version failed', f'fix the Git install at {git}')
+        except Exception as exc:  # noqa: BLE001
+            bad('git is unusable', f'fix the Git install: {exc}')
+
+    missing_imports: list[str] = []
+    for module_name in _REQUIRED_IMPORTS:
+        try:
+            __import__(module_name)
+        except Exception:  # noqa: BLE001
+            missing_imports.append(module_name)
+    if missing_imports:
+        bad(
+            'dependencies missing: ' + ', '.join(missing_imports),
+            f'from this repo run `{_cli()} try` so the launcher can create '
+            '.venv and install requirements.lock.txt '
+            '(Debian/Ubuntu: sudo apt-get install python3-venv python3-pip first)',
+        )
+    else:
+        ok('dependencies', ', '.join(_REQUIRED_IMPORTS))
+
+    try:
+        import ensurepip  # noqa: F401
+    except ImportError:
+        if missing_imports:
+            bad(
+                'python venv/ensurepip is missing',
+                'Debian/Ubuntu: sudo apt-get install python3-venv python3-pip; '
+                f'then `rm -rf .venv` and `{_cli()} try`',
+            )
+        else:
+            warn(
+                'python venv/ensurepip is missing',
+                f'`{_cli()} try` will use this interpreter because dependencies '
+                'are already installed; install python3-venv for an isolated .venv',
+            )
+    else:
+        ok('python venv', 'ensurepip available')
+
+    if NodeConfig().require_signed_tasks is not True:
+        bad(
+            'OPEN MODE is the NodeConfig default',
+            'this is a code bug — do not start the node; report it',
+        )
+    else:
+        ok('signed tasks required by default', 'OPEN MODE is off')
+
+    require_signed = os.environ.get('TEAM_REQUIRE_SIGNED', '1')
+    if require_signed == '0':
+        bad(
+            'OPEN MODE is enabled in this environment (TEAM_REQUIRE_SIGNED=0)',
+            'unset TEAM_REQUIRE_SIGNED, then re-run this command. Never use --open '
+            'for a first run',
+        )
+    else:
+        ok('TEAM_REQUIRE_SIGNED', require_signed)
+
+    if os.environ.get('TEAM_ALLOW_SHELL', '') == '1':
+        warn(
+            'TEAM_ALLOW_SHELL=1 grants local shell/write tools',
+            'unset TEAM_ALLOW_SHELL unless you intentionally accept that risk',
+        )
+    else:
+        ok('TEAM_ALLOW_SHELL', 'unset (shell tools off)')
+
+    revocations_path = str(
+        os.environ.get('TEAM_REVOCATIONS', '') or ''
+    ).strip()
+    if not revocations_path:
+        warn(
+            'TEAM_REVOCATIONS / revocations_file is unset',
+            'signed mode still boots with a silent empty deny-list '
+            '(no addresses revoked). That is not an affirmed empty list. '
+            'Set TEAM_REVOCATIONS to a JSON file (`[]` is OK). See '
+            'docs/rdap-revocation.md',
+        )
+    else:
+        try:
+            from team_agents.raven_identity import load_revocations
+
+            revoked = load_revocations(revocations_path)
+            ok(
+                'revocations file',
+                f'{revocations_path} ({len(revoked)} address(es))',
+            )
+        except Exception as exc:  # noqa: BLE001
+            bad(
+                'revocations file failed closed',
+                f'fix TEAM_REVOCATIONS={revocations_path}: {exc} — '
+                'docs/rdap-revocation.md',
+            )
+
+    st = state()
+    if not st.get('name'):
+        ok('environment', 'ready before init')
+        print(
+            f'\nnext: `{_cli()} try` proves signed localhost A2A, then '
+            f'`{_cli()} init --name you --no-internet`'
+        )
+    else:
+        ok('initialized', f'{st["name"]}' + (f' · {st.get("role")}' if st.get('role') else ''))
+        repo = Path(st.get('repo') or BASE / 'team-repo').resolve()
+        keys_dir = repo / '.team' / 'keys'
+        seed = keys_dir / 'device_ed25519.seed'
+        if not seed.is_file():
+            bad(
+                f'missing Raven seed at {seed}',
+                f're-run `{_cli()} init` in this home, or check RDAP_HOME',
+            )
+        elif os.name != 'nt':
+            try:
+                mode = stat.S_IMODE(os.lstat(seed).st_mode)
+            except OSError as exc:
+                bad(f'cannot read seed permissions: {exc}', f'inspect {seed}')
+            else:
+                if mode & 0o077:
+                    bad(
+                        f'seed permissions are {mode:04o}, expected 0600',
+                        f'chmod 600 {seed}',
+                    )
+                else:
+                    ok('identity seed', '0600')
+        else:
+            ok(
+                'identity seed',
+                'present (Windows DACL enforcement is not shipped yet; '
+                'use a dedicated OS account)',
+            )
+        if not PEERS_FILE.exists():
+            bad(
+                f'missing trust file {PEERS_FILE}',
+                'a configured policy must fail closed — restore peers.json '
+                f'or re-run `{_cli()} init` in a fresh RDAP_HOME',
+            )
+        else:
+            ok('trust file', str(PEERS_FILE))
+        print(f'\nnext: `{_cli()} start --provider echo`  (keep signed; do not pass --open)')
+
+    listen_port = int(port or 9001)
+    occupancy = _port_status('127.0.0.1', listen_port)
+    if occupancy == 'free':
+        ok(f'port {listen_port}', 'free on 127.0.0.1 (start will bind it)')
+    elif missing_imports:
+        warn(
+            f'port {listen_port} occupied',
+            'install dependencies, then re-run doctor to probe /health',
+        )
+    else:
+        live, live_detail = _http_health(f'http://127.0.0.1:{listen_port}')
+        if live:
+            ok(f'port {listen_port}', f'in use and /health ok ({live_detail})')
+        else:
+            warn(
+                f'port {listen_port} occupied without RDAP /health',
+                f'pick another port for `start` and `invite`. {live_detail}',
+            )
+
+    probe_url = str(url or '').strip()
+    if probe_url and missing_imports:
+        bad(
+            '/health skipped',
+            'install dependencies, then re-run `rdap health --url ...`',
+        )
+    elif probe_url:
+        try:
+            probe_url = _validated_node_url(probe_url)
+        except ValueError as exc:
+            bad('invalid --url', str(exc))
+        else:
+            live, live_detail = _http_health(probe_url)
+            if live:
+                ok('/health', live_detail)
+            else:
+                from team_agents.runtime_hints import hint_unreachable
+
+                bad('/health failed', hint_unreachable(probe_url))
+
+    mates = st.get('teammates', {}) if isinstance(st, dict) else {}
+    live_mates = [
+        (name, mate) for name, mate in mates.items()
+        if isinstance(mate, dict)
+        and mate.get('url')
+        and mate.get('address')
+        and mate.get('public_key')
+    ]
+    if live_mates:
+        name, mate = live_mates[0]
+        try:
+            info = _probe(
+                str(mate['url']),
+                expected_address=str(mate['address']),
+                expected_public_key=str(mate['public_key']),
+                seconds=3,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warn(
+                f'signed peer probe ({name}) failed',
+                f'{exc}. next: start that node, then `{_cli()} ping --name {name}`',
+            )
+        else:
+            if info:
+                ok('signed peer probe', name)
+            else:
+                warn(
+                    f'signed peer probe ({name}) did not verify',
+                    f'start that node, then `{_cli()} ping --name {name}` / '
+                    f'`{_cli()} trust` with the live invite',
+                )
+    elif st.get('name'):
+        ok('signed peer probe', 'skipped (no trusted teammate URL yet)')
+
+    if failed:
+        print(f'\ndoctor failed ({failed} check(s)). Fix the "next:" lines above.')
+        return 1
+    print(f'\n{DOCTOR_OK}')
+    return 0
+
+
+def _run_selftest(extra: list[str]) -> int:
+    import team_agents.selftest as selftest
+
+    saved = sys.argv
+    try:
+        sys.argv = ['selftest', *extra]
+        return int(selftest.main())
+    finally:
+        sys.argv = saved
+
+
+def cmd_doctor(args) -> None:
+    sys.exit(_run_doctor(
+        url=str(getattr(args, 'url', '') or ''),
+        port=int(getattr(args, 'port', 0) or 0),
+    ))
+
+
+def cmd_selftest(args) -> None:
+    extra = ['--unit'] if getattr(args, 'unit', False) else []
+    sys.exit(_run_selftest(extra))
+
+
+def cmd_try(args) -> None:
+    """Newcomer path: doctor + the same signed localhost selftest CI runs."""
+    print('RDAP try — verify this machine can run signed A2A')
+    print('No API key, no second device, OPEN MODE stays off.\n')
+    doctor_rc = _run_doctor()
+    if doctor_rc != 0:
+        print(f'\nfix the doctor failures above, then re-run `{_cli()} try`.')
+        sys.exit(doctor_rc)
+    print()
+    extra = ['--unit'] if getattr(args, 'unit', False) else []
+    selftest_rc = _run_selftest(extra)
+    if selftest_rc == 0:
+        print()
+        print(TRY_OK)
+        print('This machine can run signed RDAP A2A.')
+        print('First-ask checklist: both nodes still running; complete invite URL;')
+        print(f'  `{_cli()} ping --name <peer>` ok; no --open; see README.')
+        print('Cancel RPC `canceled` is a store force-save, not end-to-end')
+        print('  terminal (docs/rdap-task-lifecycle.md §9.1).')
+        print('Unset TEAM_REVOCATIONS is a silent empty deny-list')
+        print('  (docs/rdap-revocation.md) — not an affirmed empty list.')
+        print('Next (README first-ask checklist):')
+        print('  try → init → start → health → invite → trust → ping → ask')
+        print(f'  {_cli()} init --name you --role explorer --no-internet')
+        print(f'  {_cli()} start --provider echo')
+    else:
+        print(f'\nselftest failed. Re-run `{_cli()} doctor`, then `{_cli()} try`.')
+    sys.exit(selftest_rc)
+
+
 def _menu() -> None:
     """Friendly dashboard when ./rdap is run with no arguments."""
     import team_agents.ui as ui
 
     st = state()
     if not st.get('name'):
-        print(ui.bold('\n  Welcome to RDAP — agents that never lose connection\n'))
-        print('  1. set up this agent      ' + ui.cyan('./rdap init --name you'))
-        print('  2. pick a brain           ' + ui.cyan('./rdap model'))
-        print('\n  then: start the node and say hi to teammates.')
+        cli = _cli()
+        print(ui.bold('\n  Welcome to RDAP\n'))
+        print('  First, prove this machine works (no API key, OPEN MODE off):')
+        print('    ' + ui.cyan(f'{cli} try'))
+        print()
+        print('  First-ask path (see README):')
+        print('    try → init → start → invite → trust → ping → ask')
+        print('    1. ' + ui.cyan(f'{cli} init --name you --no-internet'))
+        print('    2. ' + ui.cyan(f'{cli} start --provider echo'))
+        print()
+        print(f'  `{cli} doctor` reports Python, Git, signed-by-default,')
+        print('  and whether TEAM_REVOCATIONS / revocations_file is set.')
+        print('  Cancel is not end-to-end terminal (lifecycle §9.1).')
         return
 
     goal = ''
@@ -1718,12 +2150,14 @@ def _menu() -> None:
     ], title='RDAP')
 
     print()
+    cli = _cli()
     for cmd, desc, ex in (
-        ('start', 'run your agent', './rdap start'),
-        ('ask', 'delegate a task', './rdap ask "@name do X"'),
-        ('say', 'group chat', './rdap say "@all hi"'),
-        ('chat', 'read the shared thread', './rdap chat'),
-        ('status', "what's happening", './rdap status'),
+        ('start', 'run your agent', f'{cli} start --provider echo'),
+        ('ask', 'delegate a task', f'{cli} ask "Reply exactly: RDAP_OK"'),
+        ('say', 'group chat', f'{cli} say "@all hi"'),
+        ('chat', 'read the shared thread', f'{cli} chat'),
+        ('doctor', 're-check this machine', f'{cli} doctor'),
+        ('status', "what's happening", f'{cli} status'),
     ):
         print(
             f'  {ui.bold(cmd.ljust(8))} {ui.dim(desc.ljust(26))} {ui.cyan(ex)}'
@@ -1736,7 +2170,7 @@ def cmd_status(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     goal = ''
     try:
         from team_agents.chat import TeamChat
@@ -1767,7 +2201,7 @@ def cmd_board(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     m = TeamMemory(Path(st.get('repo') or BASE / 'team-repo'))
     rows = m._parse_board_rows()
     if not rows:
@@ -1836,7 +2270,7 @@ def cmd_do(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     repo = Path(st.get('repo') or BASE / 'team-repo')
     idn = RavenIdentity.load_or_create(repo / '.team' / 'keys')
 
@@ -1900,7 +2334,7 @@ def cmd_ls(args) -> None:
     print(f'me: {me}  ({st.get("address", "?")[:18]}…)')
     mates = st.get('teammates', {})
     if not mates:
-        print('teammates: (none) — ./rdap discover --trust all')
+        print(f'teammates: (none) — {_cli()} trust \'<invite>\' or {_cli()} discover --trust all')
         return
     token = resolve_bearer_token(token_file=args.token_file)
     network_targets = {
@@ -1957,7 +2391,7 @@ def cmd_watch(args) -> None:
 
     st = state()
     if not st.get('name'):
-        sys.exit('run `./rdap init` first')
+        _need_init()
     repo = Path(st.get('repo') or BASE / 'team-repo')
 
     from team_agents.memory import TeamMemory
@@ -2047,8 +2481,51 @@ def main() -> None:
     if len(sys.argv) == 1:
         return _menu()
 
-    p = argparse.ArgumentParser(prog='rdap', description='RDAP wizard')
+    p = argparse.ArgumentParser(
+        prog='rdap',
+        description=(
+            'RDAP — signed agent-to-agent tasks. '
+            f'Newcomer path: `{_cli()} try` then `{_cli()} init --name you --no-internet`.'
+        ),
+        epilog=(
+            'OPEN MODE (--open / TEAM_REQUIRE_SIGNED=0) is never the default. '
+            'Do not add those flags for a first run.'
+        ),
+    )
     sub = p.add_subparsers(dest='cmd', required=True)
+
+    tr = sub.add_parser(
+        'try',
+        help='newcomer path: doctor + signed localhost selftest (same as CI)',
+    )
+    tr.add_argument(
+        '--unit', action='store_true',
+        help='unit tests only (skip the local network selftest)',
+    )
+    tr.set_defaults(fn=cmd_try)
+
+    doc = sub.add_parser(
+        'doctor',
+        help='check Python, Git, deps, signed-by-default, port, and /health',
+    )
+    doc.add_argument('--url', default='', help='live node URL to GET /health')
+    doc.add_argument('--port', type=int, default=0, help='port to probe (default 9001)')
+    doc.set_defaults(fn=cmd_doctor)
+
+    hl = sub.add_parser('health', help='GET /health on a running node')
+    hl.add_argument('--url', default='', help='node URL (default http://127.0.0.1:9001)')
+    hl.add_argument('--port', type=int, default=0, help='loopback port when --url is omitted')
+    hl.set_defaults(fn=cmd_health)
+
+    stest = sub.add_parser(
+        'selftest',
+        help='run the signed localhost A2A selftest (same suite as CI)',
+    )
+    stest.add_argument(
+        '--unit', action='store_true',
+        help='unit tests only (skip the local network selftest)',
+    )
+    stest.set_defaults(fn=cmd_selftest)
 
     i = sub.add_parser('init', help='first-time setup of this agent')
     i.add_argument('--name', default='')
@@ -2085,7 +2562,10 @@ def main() -> None:
     )
     s.add_argument('--model', default='')
     s.add_argument('--base-url', default='', help='OpenAI-compatible endpoint')
-    s.add_argument('--allow-shell', action='store_true')
+    s.add_argument(
+        '--allow-shell', action='store_true',
+        help='DANGEROUS: enable shell/write tools with this OS user\'s authority',
+    )
     s.add_argument('--poll', type=int, default=0,
                    help='mesh/git drain interval seconds (default 20)')
     s.add_argument(

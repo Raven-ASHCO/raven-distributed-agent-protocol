@@ -2,6 +2,230 @@
 
 RDAP is an **experimental A2A agent-delegation companion** to [RAVEN](https://github.com/Ahmadreza-Arezehgar/RAVEN). This repository is a published snapshot of the `agent_team/` tree of that monorepo (version 1.1.0); development happens there and is synced here. It lets explicitly trusted agents exchange recipient-bound, expiring Ed25519-signed tasks and signed answers over A2A JSON-RPC. It is not yet the same runtime or identity store as `raven-node`.
 
+**OPEN MODE is never the default.** Do not pass `--open` or set `TEAM_REQUIRE_SIGNED=0` for a first run.
+
+## Quickstart
+
+You need **Python 3.10+** (with the `venv` / `ensurepip` module) and **Git**. No API key, no second device, and no `--open`.
+
+Debian / Ubuntu also need the separate venv package:
+
+```bash
+sudo apt-get install python3 python3-venv python3-pip git
+```
+
+Linux / macOS:
+
+```bash
+git clone https://github.com/Raven-ASHCO/raven-distributed-agent-protocol.git
+cd raven-distributed-agent-protocol
+./rdap try
+```
+
+Windows (`cmd.exe`):
+
+```bat
+git clone https://github.com/Raven-ASHCO/raven-distributed-agent-protocol.git
+cd raven-distributed-agent-protocol
+rdap.cmd try
+```
+
+`./rdap` (or `rdap.cmd`) creates `.venv`, installs the hash-locked graph from `requirements.lock.txt`, then runs `doctor` plus the same signed localhost A2A selftest as CI. First install can take a few minutes.
+
+Success looks like this (exit code 0):
+
+```
+RDAP_DOCTOR_OK
+…
+RDAP_TRY_OK
+```
+
+Re-check the machine later with `./rdap doctor` (or `rdap.cmd doctor`).
+
+Address deny-list (unset `TEAM_REVOCATIONS` is a silent empty set today, not an
+affirmed empty list): [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+Operator task-status cheat-sheet:
+[`docs/newcomer-task-lifecycle.md`](docs/newcomer-task-lifecycle.md)
+(freeze baseline: [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md)).
+
+### What a task looks like (short)
+
+After `trust` + `ask`, the peer runs an A2A task. Statuses you may see:
+
+- **REJECTED** — signed-mode auth/delegation failed; payload is not journaled; not retained in history.
+- **SUBMITTED → WORKING → COMPLETED** — happy path for `rdap ask` with echo/provider.
+- **FAILED** — executor/brain error.
+- **CANCELED** — Cancel RPC by the **task owner** (same Raven principal that created it); other peers get task-not-found.
+
+Tasks are **owner-scoped**: List/Get/Subscribe/Cancel only see your signed Raven identity’s tasks.
+
+Two independent auth checks: (1) every JSON-RPC request is Raven HTTP-signed; (2) the task/answer payload carries a separate delegation signature. Both must pass in signed mode. Do **not** use `--open` for normal use.
+
+> Cancel currently force-saves a `CANCELED` status for the Cancel caller, but the in-flight brain may still finish a COMPLETED artifact — open conformance gap; do not treat cancel as fully terminalized yet (see lifecycle [§9.1](docs/rdap-task-lifecycle.md#91-critical--cancel-status-skew-open-o5-conformance-gap)).
+
+Details: [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md). Address deny-list / revoke: [`docs/rdap-revocation.md`](docs/rdap-revocation.md). Short operator page: [`docs/newcomer-task-lifecycle.md`](docs/newcomer-task-lifecycle.md).
+
+## First-ask checklist
+
+Copy-paste path from a clean machine to the first signed task. Do **not** skip
+a step. OPEN MODE stays off.
+
+| Step | Command | Done when |
+|---|---|---|
+| 1. Install | `git clone …` then `cd raven-distributed-agent-protocol` (Debian/Ubuntu: `python3-venv` first) | repo is on disk |
+| 2. Prove the machine | `./rdap try` (or `./rdap doctor` then `./rdap selftest`) | `RDAP_DOCTOR_OK` and `RDAP_TRY_OK` |
+| 3. Init each home | `RDAP_HOME=… ./rdap init --name <you> --no-internet` | invite line printed |
+| 4. Start each node | `RDAP_HOME=… ./rdap start --ip … --port … --provider echo` | process stays running; no `--open` |
+| 4b. Health | `./rdap health --url http://127.0.0.1:<port>` or `curl -sS http://127.0.0.1:<port>/health` | `{"status":"ok"}` |
+| 5. Invite | `RDAP_HOME=… ./rdap invite --ip … --port …` | five-field `RDAP1 … http://…` line |
+| 6. Trust | `RDAP_HOME=… ./rdap trust '<complete invite>'` | `trusted` after live card check |
+| 7. Ping | `RDAP_HOME=… ./rdap ping --name <peer>` | `alive` |
+| 8. Ask | `RDAP_HOME=… ./rdap ask 'Reply exactly: RAVEN_A2A_OK_…' --name <peer>` | `completed task` + marker |
+
+Before step 8, also confirm:
+
+- Both `start` processes are still running (`trust` / `ask` need a live card).
+- The invite pasted into `trust` includes the `http://host:port` URL.
+- No `--open`, no `--allow-shell`, no `TEAM_REQUIRE_SIGNED=0`.
+- `TEAM_REVOCATIONS` is unset by default: signed mode boots with a **silent
+  empty deny-list**. That is not “I affirmed nobody is revoked.” Doctor reports
+  this. See [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+
+Statuses after `ask` are listed under [What a task looks like (short)](#what-a-task-looks-like-short). Do not treat Cancel as fully terminalized yet.
+
+## First task on this machine
+
+Two signed echo agents on loopback. Keep OPEN MODE off. Use two terminals in this clone.
+
+Terminal 1 — Alice:
+
+```bash
+export RDAP_HOME="$PWD/alice-home"
+./rdap init --name alice --role coordinator --no-internet
+./rdap start --ip 127.0.0.1 --port 9001 --provider echo
+```
+
+Terminal 2 — Bob:
+
+```bash
+export RDAP_HOME="$PWD/bob-home"
+./rdap init --name bob --role worker --no-internet
+./rdap start --ip 127.0.0.1 --port 9002 --provider echo
+```
+
+Leave both `start` processes running. In a third terminal, exchange the printed invite lines (or ask each node for one):
+
+```bash
+# Alice's invite (home must match the running node)
+RDAP_HOME="$PWD/alice-home" ./rdap invite --ip 127.0.0.1 --port 9001
+RDAP_HOME="$PWD/bob-home"   ./rdap invite --ip 127.0.0.1 --port 9002
+```
+
+Trust, ping, and ask. Paste the **complete** invite line from the other agent, including the `http://127.0.0.1:…` URL:
+
+```bash
+RDAP_HOME="$PWD/alice-home" ./rdap trust 'RDAP1 bob <bob-rvn1> <bob-ed25519> http://127.0.0.1:9002'
+RDAP_HOME="$PWD/alice-home" ./rdap ping --name bob
+RDAP_HOME="$PWD/alice-home" ./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_BOB' --name bob
+```
+
+```bash
+RDAP_HOME="$PWD/bob-home" ./rdap trust 'RDAP1 alice <alice-rvn1> <alice-ed25519> http://127.0.0.1:9001'
+RDAP_HOME="$PWD/bob-home" ./rdap ping --name alice
+RDAP_HOME="$PWD/bob-home" ./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_ALICE' --name alice
+```
+
+`trust` does a live signed-card check, so the destination `start` must already be running. Walk the [First-ask checklist](#first-ask-checklist) before the first `ask`. The echo result should say `completed task` and include the requested marker.
+
+On Windows, replace `./rdap` with `rdap.cmd`, `export RDAP_HOME=...` with `set RDAP_HOME=...`, and use double quotes around each invite/task string.
+
+Do not add `--open` or `--allow-shell` for this first task.
+
+## Runtime first-run (start → health → signed task)
+
+`./rdap try` is the zero-placeholder signed proof (same suite as CI). After
+that, this copy-paste path starts a real node, checks `/health`, and sends one
+signed task. OPEN MODE stays off.
+
+Terminal 1:
+
+```bash
+cd raven-distributed-agent-protocol
+./rdap init --name you --role explorer --no-internet
+./rdap start --ip 127.0.0.1 --port 9001 --provider echo
+```
+
+Equivalent advanced entrypoint (after `./rdap` has created `.venv`):
+
+```bash
+.venv/bin/python -m team_agents serve --name you --host 127.0.0.1 --port 9001 \
+  --repo team-repo --peers peers.json --provider echo
+```
+
+On Windows use `.venv\Scripts\python.exe -m team_agents serve ...`.
+
+Terminal 2 — health, then the first signed client task. `./rdap try` is the
+copy-paste signed task that works from a clean clone (no invite placeholders).
+A second signed `ask` needs a trusted peer (see [First-ask checklist](#first-ask-checklist)).
+
+```bash
+./rdap health --url http://127.0.0.1:9001
+curl -sS http://127.0.0.1:9001/health
+./rdap try
+```
+
+`--open` / `TEAM_REQUIRE_SIGNED=0` is a documented dangerous opt-in only. Do
+not use it for this first run. Cancel RPC `canceled` is a store force-save, not
+end-to-end terminal ([`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1).
+
+## Two devices on a trusted LAN
+
+For the first deterministic two-device LAN smoke, keep the `echo` provider so no API key, model download, Internet relay, or shared Git repository is involved. Rely on Raven signatures and do not configure Bearer. Allow inbound TCP `9001` only on the private/trusted LAN in each device's firewall, then find each device's real IPv4 LAN address (not `127.0.0.1`). The current listener is IPv4-only; a URL-safe ASCII hostname can be supplied, but RDAP validates only its syntax and every peer must resolve it to IPv4. A raw IPv6 address and the IPv4 limited-broadcast address are rejected explicitly. For this smoke, use the numeric LAN IPv4 address.
+
+On Linux/macOS use `./rdap`. On native Windows use `rdap.cmd` (or `powershell -NoProfile -ExecutionPolicy Bypass -File .\rdap.ps1`). Both install the same hash-locked environment and forward the same arguments.
+
+On Alice, in terminal 1:
+
+```bash
+cd raven-distributed-agent-protocol
+./rdap init --name alice --role coordinator --no-internet
+./rdap invite --ip <alice-lan-ip> --port 9001
+./rdap start --ip <alice-lan-ip> --port 9001 --provider echo
+```
+
+On Bob, in terminal 1:
+
+```bash
+cd raven-distributed-agent-protocol
+./rdap init --name bob --role worker --no-internet
+./rdap invite --ip <bob-lan-ip> --port 9001
+./rdap start --ip <bob-lan-ip> --port 9001 --provider echo
+```
+
+Keep both `start` commands running. RDAP refuses to substitute loopback when the machine has no default route, and startup fails instead of silently moving to another port if `9001` is occupied.
+
+Exchange the two invite lines through an authenticated channel. In terminal 2 on each device, first enter that device's clone of this repository. Alice then trusts Bob's complete invite, and Bob trusts Alice's. A supplied URL is saved only after the live signed Agent Card and Raven identity match the invite pin:
+
+```bash
+# Alice, terminal 2
+cd /path/to/raven-distributed-agent-protocol
+./rdap trust 'RDAP1 bob <bob-rvn1> <bob-ed25519> http://<bob-lan-ip>:9001'
+./rdap ping --name bob
+./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_BOB' --name bob
+
+# Bob, terminal 2
+cd /path/to/raven-distributed-agent-protocol
+./rdap trust 'RDAP1 alice <alice-rvn1> <alice-ed25519> http://<alice-lan-ip>:9001'
+./rdap ping --name alice
+./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_ALICE' --name alice
+```
+
+For Windows `cmd.exe`, begin every new terminal with `cd /d C:\path\to\raven-distributed-agent-protocol`, replace `./rdap` with `rdap.cmd`, and use double quotes around each complete invite/task string, for example `rdap.cmd trust "RDAP1 bob ..."`; single quotes in the Bash examples are not CMD quoting.
+
+Direct HTTP is signed and peer-pinned but is not encrypted; keep it on a network you trust, or add HTTPS before using it across an untrusted network.
+
+A four-field invite without a URL remains valid for offline pin setup, but it does not create a direct endpoint. Bearer-protected peers require a securely obtained **destination server's** token during `trust` and `ask`; use HTTPS for every authenticated endpoint. `discover` is public TOFU only and will never send a Bearer token to an untrusted mDNS endpoint.
+
 ## Security model
 
 The default server rejects unsigned RPC traffic and unsigned tasks. A trusted peer entry pins an exact Raven-style address to an exact Ed25519 public key; agent cards and replies are verified against that pin. Every JSON-RPC request is separately signed over its HTTP method, exact request target, body digest, sender, recipient, nonce, issue time, and expiry. That verified Raven address becomes the A2A `ServerCallContext` owner, so task history and live `List`, `Get`, `Subscribe`, and `Cancel` operations are isolated per peer. Delegations additionally bind the task sender, recipient, task ID, task/reply kind and payload. Accepted transport and delegation signatures use separate durable replay caches.
@@ -12,9 +236,15 @@ The default server rejects unsigned RPC traffic and unsigned tasks. A trusted pe
   replay/mesh private state, Git internals, symlink/reparse paths, obvious env
   files, credentials, tokens, private-key formats, and hard-linked files.
 - Bearer authentication is advertised and enforced only when a token is configured.
-- Revocation/trust-file failures reject work rather than silently weakening policy.
-- Cancellation requires the task owner's fresh Raven request signature and emits
-  a terminal A2A `canceled` status; a different trusted peer receives task-not-found.
+- Revocation/trust-file failures reject work rather than silently weakening policy
+  **once a path is configured**. An unset `TEAM_REVOCATIONS` / `revocations_file`
+  is still a silent empty deny-list (not an affirmed empty list). See
+  [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+- Cancellation requires the task owner's fresh Raven request signature. The
+  Cancel RPC caller sees a store-forced A2A `canceled` status; a different
+  trusted peer receives task-not-found. That force-save is **not** end-to-end
+  terminal: the executor/brain may still complete (open gap
+  [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1).
 - Delegation authentication runs before task text reaches durable team memory or
   Git sync; unsigned, invalid, and policy-error requests receive an A2A rejection
   without journaling their payload or moving repository state.
@@ -132,6 +362,9 @@ An operator may use another OpenAI-compatible endpoint only by selecting
 `TEAM_LLM_API_KEY` or mode-`0600` `TEAM_LLM_API_KEY_FILE`. A keyed custom endpoint
 must use HTTPS; RDAP refuses to send any credential over HTTP.
 
+The first-run path uses `--provider echo` and does not need a key. To attach a
+hosted or local model later:
+
 ```bash
 ./rdap model groq llama-3.3-70b-versatile
 export GROQ_API_KEY='...'
@@ -144,97 +377,21 @@ export TEAM_LLM_API_KEY_FILE="$HOME/.config/rdap/custom-llm-key"
 
 RDAP currently creates its own key under `.team/keys` and does not submit or receive application payloads through the production `raven-node` ATSAM session actor. The experimental mailbox invokes the separately gated `raven-swarm-mailbox-experimental` binary, not the normal terminal node. Unifying RDAP with the node identity/protected store and encrypted Raven carrier remains required before this can truthfully be called “A2A over production Raven Node.”
 
-## Run and verify
+That includes the Sprint O6 two-device Raven↔RDAP crypto path: it is **not** present in this snapshot and is not invented here. Use signed standalone RDAP (Quickstart / First task) until the monorepo lands that integration.
 
-Python 3.10 or newer is required. The `./rdap` launcher installs the exact
-hash-verified dependency graph from `requirements.lock.txt`; CI uses that same
-lock on Python 3.10 and 3.12. For the first deterministic two-device LAN smoke,
-use the built-in `echo` provider so no API key, model download, Internet relay,
-or shared Git repository is involved. Rely on Raven signatures and do not
-configure Bearer. Allow inbound TCP `9001` only on the private/trusted LAN in
-each device's firewall, then find each device's real IPv4 LAN address (not
-`127.0.0.1`). The current listener is IPv4-only; a URL-safe ASCII hostname can
-be supplied, but RDAP validates only its syntax and every peer must resolve it
-to IPv4. A raw IPv6 address and the IPv4 limited-broadcast address are rejected
-explicitly. For this first smoke, use the numeric LAN IPv4 address.
-
-On Linux/macOS use `./rdap`. On native Windows use `rdap.cmd` (or
-`powershell -NoProfile -ExecutionPolicy Bypass -File .\rdap.ps1`). Both install
-the same hash-locked environment and forward the same arguments.
-
-On Alice, in terminal 1:
+## Verify
 
 ```bash
-cd raven-distributed-agent-protocol
-./rdap init --name alice --role coordinator --no-internet
-./rdap invite --ip <alice-lan-ip> --port 9001
-./rdap start --ip <alice-lan-ip> --port 9001 --provider echo
+./rdap try
+# equivalent after the launcher has created .venv:
+./rdap selftest
 ```
 
-On Bob, in terminal 1:
+On native Windows:
 
-```bash
-cd raven-distributed-agent-protocol
-./rdap init --name bob --role worker --no-internet
-./rdap invite --ip <bob-lan-ip> --port 9001
-./rdap start --ip <bob-lan-ip> --port 9001 --provider echo
-```
-
-Keep both `start` commands running. RDAP refuses to substitute loopback when
-the machine has no default route, and startup fails instead of silently moving
-to another port if `9001` is occupied.
-
-Exchange the two invite lines through an authenticated channel. In terminal 2
-on each device, first enter that device's clone of this repository. Alice
-then trusts Bob's complete invite, and Bob trusts Alice's. A supplied URL is
-saved only after the live signed Agent Card and Raven identity match the invite
-pin:
-
-```bash
-# Alice, terminal 2
-cd /path/to/raven-distributed-agent-protocol
-./rdap trust 'RDAP1 bob <bob-rvn1> <bob-ed25519> http://<bob-lan-ip>:9001'
-./rdap ping --name bob
-./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_BOB' --name bob
-
-# Bob, terminal 2
-cd /path/to/raven-distributed-agent-protocol
-./rdap trust 'RDAP1 alice <alice-rvn1> <alice-ed25519> http://<alice-lan-ip>:9001'
-./rdap ping --name alice
-./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_ALICE' --name alice
-```
-
-Run those trust/ping/ask commands in terminal 2 on each device. `trust` performs
-a live signed-card check, so the destination node must already be running. The
-echo result should say `completed task` and include the requested marker in its
-task summary. For Windows `cmd.exe`, begin every new terminal with
-`cd /d C:\path\to\raven-distributed-agent-protocol`, replace `./rdap` with `rdap.cmd`, and use
-double quotes around each complete invite/task string, for example
-`rdap.cmd trust "RDAP1 bob ..."`; single quotes in the Bash examples are not CMD
-quoting.
-
-Do not add `--open` or `--allow-shell` for this smoke. Direct HTTP is signed and
-peer-pinned but is not encrypted; keep it on a network you trust, or add HTTPS
-before using it across an untrusted network.
-
-A four-field invite without a URL remains valid for offline pin setup, but it
-does not create a direct endpoint. Bearer-protected peers require a securely
-obtained **destination server's** token during `trust` and `ask`; use HTTPS
-for every authenticated endpoint. `discover` is public TOFU only and will never
-send a Bearer token to an untrusted mDNS endpoint.
-
-Run the authentication and real localhost A2A flow:
-
-```bash
-./rdap status  # bootstraps the local virtualenv/dependencies if needed
-.venv/bin/python -m team_agents.selftest
-```
-
-On native Windows, use the equivalent launcher and virtualenv path:
-
-```powershell
-rdap.cmd status
-.venv\Scripts\python.exe -m team_agents.selftest
+```bat
+rdap.cmd try
+rdap.cmd selftest
 ```
 
 CI runs the same functional suite on Linux, macOS, and Windows via

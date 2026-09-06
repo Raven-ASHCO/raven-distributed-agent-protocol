@@ -1,9 +1,13 @@
 """CLI: run an agent node, inspect its raven identity, or delegate tasks.
 
-    python -m team_agents serve --name raphael --port 9001 --repo <shared-repo>
-    python -m team_agents id --keys-dir <repo>/.team/keys
-    python -m team_agents send --url http://127.0.0.1:9001 --text "do X" \
-        --keys-dir <sender-repo>/.team/keys
+Newcomer path (signed, no --open): ``./rdap try`` then ``./rdap start`` and
+``./rdap health --url http://127.0.0.1:9001``. Advanced equivalent:
+
+    python -m team_agents serve --name you --host 127.0.0.1 --port 9001 \
+        --repo team-repo --peers peers.json --provider echo
+    curl -sS http://127.0.0.1:9001/health
+    python -m team_agents send --url http://127.0.0.1:9001 --text "ping" \
+        --keys-dir <sender>/.team/keys --peer-address <rvn1> --peer-public-key <hex>
 """
 
 from __future__ import annotations
@@ -82,7 +86,10 @@ def cmd_serve(args: argparse.Namespace) -> None:
         ),
     )
     _apply_common(cfg, args)
-    serve(cfg)
+    try:
+        serve(cfg)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def cmd_id(args: argparse.Namespace) -> None:
@@ -94,21 +101,30 @@ def cmd_send(args: argparse.Namespace) -> None:
     from .client import send_task
 
     identity = RavenIdentity.load_or_create(args.keys_dir) if args.keys_dir else None
-    result = __import__('asyncio').run(
-        send_task(
-            args.url,
-            args.text,
-            identity=identity,
-            expected_peer_address=args.peer_address,
-            expected_peer_public_key=args.peer_public_key,
-            token_file=args.token_file,
+    try:
+        result = __import__('asyncio').run(
+            send_task(
+                args.url,
+                args.text,
+                identity=identity,
+                expected_peer_address=args.peer_address,
+                expected_peer_public_key=args.peer_public_key,
+                token_file=args.token_file,
+            )
         )
-    )
+    except (TimeoutError, ConnectionError, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from exc
     print(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog='team_agents')
+    p = argparse.ArgumentParser(
+        prog='team_agents',
+        description=(
+            'Advanced RDAP node CLI. Newcomer path: ./rdap try then '
+            './rdap start and ./rdap health. OPEN MODE (--open) is never default.'
+        ),
+    )
     sub = p.add_subparsers(dest='cmd', required=True)
 
     s = sub.add_parser('serve', help='run an A2A agent node')

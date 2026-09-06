@@ -90,7 +90,7 @@ if ($null -eq $pythonCommand) {
 }
 
 if ($null -eq $pythonCommand) {
-    throw 'Python 3.10 or newer is required via python.exe or py.exe.'
+    throw 'Python 3.10 or newer is required via python.exe or py.exe. Install it from https://www.python.org/downloads/ then re-run rdap.cmd try'
 }
 
 $venvPath = Join-Path $PSScriptRoot '.venv'

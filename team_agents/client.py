@@ -335,6 +335,53 @@ async def send_task(
     require_secure_bearer_transport(url, token)
     headers = {'Authorization': f'Bearer {token}'} if token else None
     base_url = url.rstrip('/') + '/'
+    try:
+        return await _send_task_inner(
+            url,
+            text,
+            identity=identity,
+            expected_peer_address=expected_peer_address,
+            expected_peer_public_key=expected_peer_public_key,
+            token=token,
+            headers=headers,
+            base_url=base_url,
+            timeout=timeout,
+        )
+    except httpx.TimeoutException as exc:
+        from .runtime_hints import hint_timeout
+
+        raise TimeoutError(hint_timeout(url)) from exc
+    except httpx.ConnectError as exc:
+        from .runtime_hints import hint_unreachable
+
+        raise ConnectionError(hint_unreachable(url)) from exc
+    except httpx.HTTPStatusError as exc:
+        from .runtime_hints import hint_rpc_capacity, hint_unsigned_open
+
+        status = exc.response.status_code
+        if status == 503:
+            raise RuntimeError(hint_rpc_capacity()) from exc
+        if status == 401:
+            raise RuntimeError(hint_unsigned_open()) from exc
+        raise
+    except CardVerificationError as exc:
+        from .runtime_hints import hint_peer_pin
+
+        raise CardVerificationError(f'{exc}. {hint_peer_pin()}') from exc
+
+
+async def _send_task_inner(
+    url: str,
+    text: str,
+    *,
+    identity: RavenIdentity,
+    expected_peer_address: str,
+    expected_peer_public_key: str,
+    token: str,
+    headers: dict[str, str] | None,
+    base_url: str,
+    timeout: float,
+) -> str:
     # Fetch the public card without credentials.  Only after its signature and
     # advertised endpoint match the existing Raven pin may a Bearer token be
     # attached to RPC traffic.

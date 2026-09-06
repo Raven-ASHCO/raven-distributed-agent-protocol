@@ -7,8 +7,10 @@ Network part: boots two real nodes (echo brain) and exercises
              card-signature verification + a signed delegated task end-to-end
              via the actual JSON-RPC path.
 
-    ./.venv/bin/python selftest.py            # everything
-    ./.venv/bin/python selftest.py --unit     # offline only
+    ./rdap try                                # newcomer path (doctor + this suite)
+    ./rdap selftest                           # this suite only
+    ./.venv/bin/python -m team_agents.selftest
+    ./.venv/bin/python -m team_agents.selftest --unit
 """
 
 from __future__ import annotations
@@ -45,6 +47,25 @@ from team_agents.raven_identity import (  # noqa: E402
 
 PASS = []
 FAIL = []
+TRY_OK = 'RDAP_TRY_OK'
+
+
+def _selftest_python() -> str:
+    """Prefer a working project venv; never a husk that hides site-packages."""
+    for candidate in (
+        HERE.parent / '.venv' / 'bin' / 'python',
+        HERE.parent / '.venv' / 'Scripts' / 'python.exe',
+    ):
+        if not candidate.exists():
+            continue
+        probe = subprocess.run(
+            [str(candidate), '-c', 'import jwt, a2a, uvicorn'],
+            capture_output=True,
+            timeout=15,
+        )
+        if probe.returncode == 0:
+            return str(candidate)
+    return sys.executable
 
 
 def check(name: str, cond: bool, detail: str = '') -> None:
@@ -562,6 +583,154 @@ def unit_tests() -> None:
             },
             f'rc={model_result.returncode} state={configured_model!r} '
             f'stderr={model_result.stderr[-500:]!r}',
+        )
+
+        help_result = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), '--help'],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        help_text = help_result.stdout + help_result.stderr
+        check(
+            'newcomer CLI advertises try, doctor, health, and selftest',
+            help_result.returncode == 0
+            and all(
+                command in help_text
+                for command in ('try', 'doctor', 'health', 'selftest')
+            ),
+            help_text[:500],
+        )
+        posix_launcher = (PKG_ROOT / 'rdap').read_text(encoding='utf-8')
+        check(
+            'POSIX launcher documents python3-venv recovery',
+            'python3-venv' in posix_launcher
+            and '_print_venv_help' in posix_launcher
+            and '_venv_has_pip' in posix_launcher,
+        )
+
+        init_env.pop('TEAM_REVOCATIONS', None)
+        doctor_result = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        doctor_out = doctor_result.stdout + doctor_result.stderr
+        check(
+            'doctor succeeds on a fresh initialized home',
+            doctor_result.returncode == 0
+            and 'RDAP_DOCTOR_OK' in doctor_out
+            and 'OPEN MODE is off' in doctor_out
+            and 'revocations_file is unset' in doctor_out
+            and 'docs/rdap-revocation.md' in doctor_out
+            and 'port 9001' in doctor_out,
+            f'rc={doctor_result.returncode} out={doctor_out[-700:]!r}',
+        )
+
+        empty_revocations = tmp / 'empty-revocations.json'
+        empty_revocations.write_text('[]\n', encoding='utf-8')
+        rev_ok_env = {**init_env, 'TEAM_REVOCATIONS': str(empty_revocations)}
+        rev_ok = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=rev_ok_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        rev_ok_out = rev_ok.stdout + rev_ok.stderr
+        check(
+            'doctor reports a configured empty revocations file',
+            rev_ok.returncode == 0
+            and 'RDAP_DOCTOR_OK' in rev_ok_out
+            and '0 address' in rev_ok_out
+            and 'revocations_file is unset' not in rev_ok_out,
+            f'rc={rev_ok.returncode} out={rev_ok_out[-700:]!r}',
+        )
+
+        broken_revocations = tmp / 'doctor-broken-revocations.json'
+        broken_revocations.write_text('{broken', encoding='utf-8')
+        rev_bad_env = {**init_env, 'TEAM_REVOCATIONS': str(broken_revocations)}
+        rev_bad = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=rev_bad_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        rev_bad_out = rev_bad.stdout + rev_bad.stderr
+        check(
+            'doctor fails closed on a broken revocations file',
+            rev_bad.returncode != 0
+            and 'RDAP_DOCTOR_OK' not in rev_bad_out
+            and 'failed closed' in rev_bad_out,
+            f'rc={rev_bad.returncode} out={rev_bad_out[-700:]!r}',
+        )
+
+        open_env = {**init_env, 'TEAM_REQUIRE_SIGNED': '0'}
+        open_doctor = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=open_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        open_out = open_doctor.stdout + open_doctor.stderr
+        check(
+            'doctor refuses OPEN MODE from TEAM_REQUIRE_SIGNED=0',
+            open_doctor.returncode != 0
+            and 'RDAP_DOCTOR_OK' not in open_out
+            and 'TEAM_REQUIRE_SIGNED=0' in open_out,
+            f'rc={open_doctor.returncode} out={open_out[-700:]!r}',
+        )
+
+        unset_home = tmp / 'doctor-before-init'
+        unset_home.mkdir()
+        unset_env = {**init_env, 'RDAP_HOME': str(unset_home)}
+        unset_doctor = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=unset_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        unset_out = unset_doctor.stdout + unset_doctor.stderr
+        check(
+            'doctor succeeds before init so newcomers can self-check first',
+            unset_doctor.returncode == 0
+            and 'RDAP_DOCTOR_OK' in unset_out
+            and 'ready before init' in unset_out
+            and 'revocations_file is unset' in unset_out
+            and 'port 9001' in unset_out,
+            f'rc={unset_doctor.returncode} out={unset_out[-700:]!r}',
+        )
+
+        health_result = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'health', '--url', 'http://127.0.0.1:1',
+            ],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        health_out = health_result.stdout + health_result.stderr
+        check(
+            'health command tells the next step when /health is down',
+            health_result.returncode != 0
+            and '/health failed' in health_out
+            and 'rdap start' in health_out,
+            f'rc={health_result.returncode} out={health_out[-500:]!r}',
         )
 
         import rdap as rdap_cli
@@ -2005,6 +2174,7 @@ print('import-without-fcntl-ok')
             occupied_refused = (
                 str(occupied_port) in str(exc)
                 and occupied_cfg.port == occupied_port
+                and 'next:' in str(exc)
             )
         finally:
             occupied_socket.close()
@@ -3624,12 +3794,13 @@ def main() -> int:
     unit_tests()
     if not unit_only:
         print('== network ==')
-        venv_py = str(HERE.parent / '.venv' / 'bin' / 'python')
-        network_tests(venv_py if Path(venv_py).exists() else sys.executable)
+        network_tests(_selftest_python())
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')
     if FAIL:
         print('FAILED:', ', '.join(FAIL))
-    return 1 if FAIL else 0
+        return 1
+    print(TRY_OK)
+    return 0
 
 
 if __name__ == '__main__':

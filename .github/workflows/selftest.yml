@@ -49,5 +49,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: .\rdap.ps1 --help
+      - name: Newcomer doctor
+        run: python rdap.py doctor
       - name: Authentication, relay, cancellation, and transport selftests
         run: python -m team_agents.selftest
