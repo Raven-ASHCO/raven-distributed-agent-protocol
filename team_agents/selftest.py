@@ -130,6 +130,97 @@ def unit_tests() -> None:
         except ValueError:
             check('mismatched identity binding rejected', True)
 
+        from team_agents.raven_bind import (
+            ConfidentialClaimError,
+            PrivateKeyMaterialError,
+            apply_bind,
+            bound_principal,
+            parse_public_whoami,
+            refuse_confidential_claim,
+            resolve_node_export,
+        )
+
+        public_whoami = {
+            'schema': 'raven.whoami.public.v1',
+            'address': alice.address,
+            'public_key': alice.public_hex,
+            'fingerprint': alice.fingerprint,
+            'pin': {
+                'kind': 'ash-contact',
+                'address': alice.address,
+                'public_key': alice.public_hex,
+                'fingerprint': alice.fingerprint,
+            },
+        }
+        parsed = parse_public_whoami(public_whoami)
+        ash_alias = parse_public_whoami({
+            'address': alice.address,
+            'pub_hex': alice.public_hex,
+            'fingerprint': alice.fingerprint,
+        })
+        bound_state = apply_bind({}, parsed, source='file')
+        principal = bound_principal(bound_state)
+        check(
+            'after bind, RDAP principal RVN1 matches imported whoami',
+            principal is not None
+            and principal.address == alice.address
+            and principal.public_key == alice.public_hex
+            and principal.fingerprint == alice.fingerprint
+            and ash_alias.address == alice.address
+            and bound_state['raven_bind']['confidential'] is False
+            and bound_state['raven_bind']['hold'] is True
+            and bound_state['raven_bind']['release'] is False
+            and bound_state['raven_bind']['pin']['kind'] == 'ash-contact'
+            and bound_state['raven_bind']['pin']['invite']
+            == f'raven:{alice.address}:{alice.public_hex}',
+        )
+
+        try:
+            parse_public_whoami({
+                **public_whoami,
+                'seed': 'aa' * 32,
+            })
+            check('private key in import rejected', False)
+        except PrivateKeyMaterialError:
+            check('private key in import rejected', True)
+        try:
+            parse_public_whoami({
+                **public_whoami,
+                'jwk': {'kty': 'OKP', 'crv': 'Ed25519', 'd': 'secret'},
+            })
+            check('JWK private d in import rejected', False)
+        except PrivateKeyMaterialError:
+            check('JWK private d in import rejected', True)
+
+        try:
+            refuse_confidential_claim('atsam_rvn1')
+            check('refuse claiming confidential', False)
+        except ConfidentialClaimError as confidential_exc:
+            check(
+                'refuse claiming confidential',
+                'HOLD' in str(confidential_exc)
+                and 'atsam_rvn1' in str(confidential_exc)
+                and 'confidential' in str(confidential_exc).lower(),
+            )
+        try:
+            parse_public_whoami({**public_whoami, 'confidential': True})
+            check('whoami confidential claim rejected', False)
+        except ConfidentialClaimError:
+            check('whoami confidential claim rejected', True)
+        try:
+            parse_public_whoami({**public_whoami, 'carrier': 'atsam_rvn1'})
+            check('whoami atsam_rvn1 carrier claim rejected', False)
+        except ConfidentialClaimError:
+            check('whoami atsam_rvn1 carrier claim rejected', True)
+        try:
+            parse_public_whoami({
+                'address': alice.address,
+                'device_ed_pub': alice.public_hex,
+            })
+            check('device_ed_pub is not accepted as the pin', False)
+        except ValueError:
+            check('device_ed_pub is not accepted as the pin', True)
+
         from team_agents.config import NodeConfig, load_trusted_peers
 
         peers_file = tmp / 'peers.json'
@@ -602,6 +693,187 @@ def unit_tests() -> None:
                 for command in ('try', 'doctor', 'health', 'selftest')
             ),
             help_text[:500],
+        )
+        check(
+            'CLI help labels NON-RELEASE / HOLD on the M1 bind path',
+            help_result.returncode == 0
+            and 'NON-RELEASE' in help_text
+            and 'HOLD' in help_text
+            and 'raven-bind' in help_text
+            and 'atsam_rvn1' in help_text,
+            help_text[:800],
+        )
+
+        bind_home = tmp / 'm1-bind-home'
+        bind_home.mkdir()
+        whoami_file = tmp / 'alice.whoami.public.json'
+        whoami_file.write_text(json.dumps(public_whoami), encoding='utf-8')
+        bind_env = {**init_env, 'RDAP_HOME': str(bind_home)}
+        bind_ok = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'raven-bind', '--from', str(whoami_file),
+            ],
+            cwd=PKG_ROOT,
+            env=bind_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        bind_out = bind_ok.stdout + bind_ok.stderr
+        bind_state = {}
+        bind_state_path = bind_home / 'rdap.json'
+        if bind_state_path.is_file():
+            bind_state = json.loads(bind_state_path.read_text(encoding='utf-8'))
+        check(
+            'raven-bind CLI principal matches imported whoami',
+            bind_ok.returncode == 0
+            and bind_state.get('address') == alice.address
+            and bind_state.get('public_key') == alice.public_hex
+            and alice.address in bind_out
+            and 'NON-RELEASE' in bind_out
+            and 'HOLD' in bind_out
+            and 'not confidential' in bind_out.lower()
+            and 'atsam' in bind_out.lower()
+            and 'seed' not in bind_out.lower()
+            and 'private' not in bind_out.lower(),
+            f'rc={bind_ok.returncode} out={bind_out[-700:]!r} state={bind_state!r}',
+        )
+
+        node_dir = tmp / 'raven-data'
+        (node_dir / 'export').mkdir(parents=True)
+        export_path = node_dir / 'whoami.public.json'
+        export_path.write_text(json.dumps({
+            'address': bob.address,
+            'pub_hex': bob.public_hex,
+            'fingerprint': bob.fingerprint,
+        }), encoding='utf-8')
+        check(
+            'from-node resolves public export and ignores private store',
+            resolve_node_export(node_dir) == export_path,
+        )
+        identity_bind = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'identity', 'bind', '--from-node', str(node_dir),
+            ],
+            cwd=PKG_ROOT,
+            env=bind_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        identity_out = identity_bind.stdout + identity_bind.stderr
+        rebound = json.loads((bind_home / 'rdap.json').read_text(encoding='utf-8'))
+        check(
+            'identity bind --from-node replaces principal with node RVN1',
+            identity_bind.returncode == 0
+            and rebound.get('address') == bob.address
+            and rebound.get('public_key') == bob.public_hex
+            and 'NON-RELEASE' in identity_out
+            and 'HOLD' in identity_out,
+            f'rc={identity_bind.returncode} out={identity_out[-700:]!r}',
+        )
+
+        secret_whoami = tmp / 'secret.whoami.json'
+        secret_whoami.write_text(json.dumps({
+            **public_whoami,
+            'seed': 'ff' * 32,
+        }), encoding='utf-8')
+        bind_secret = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'raven-bind', '--from', str(secret_whoami),
+            ],
+            cwd=PKG_ROOT,
+            env=bind_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        secret_out = bind_secret.stdout + bind_secret.stderr
+        check(
+            'raven-bind CLI rejects private key material without echoing it',
+            bind_secret.returncode != 0
+            and 'private key material' in secret_out.lower()
+            and 'ff' * 8 not in secret_out
+            and 'ff' * 32 not in secret_out,
+            f'rc={bind_secret.returncode} out={secret_out[-700:]!r}',
+        )
+
+        confidential_whoami = tmp / 'confidential.whoami.json'
+        confidential_whoami.write_text(json.dumps({
+            **public_whoami,
+            'confidential': True,
+        }), encoding='utf-8')
+        bind_conf = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'identity', 'bind', '--from', str(confidential_whoami),
+            ],
+            cwd=PKG_ROOT,
+            env=bind_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        conf_out = bind_conf.stdout + bind_conf.stderr
+        check(
+            'raven-bind CLI refuses claiming confidential',
+            bind_conf.returncode != 0
+            and 'HOLD' in conf_out
+            and 'confidential' in conf_out.lower()
+            and 'atsam' in conf_out.lower(),
+            f'rc={bind_conf.returncode} out={conf_out[-700:]!r}',
+        )
+
+        bind_then_init_home = tmp / 'bind-then-init'
+        bind_then_init_home.mkdir()
+        bind_then_init_env = {**init_env, 'RDAP_HOME': str(bind_then_init_home)}
+        prebind = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'raven-bind', '--from', str(whoami_file),
+            ],
+            cwd=PKG_ROOT,
+            env=bind_then_init_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        post_init = subprocess.run(
+            [
+                sys.executable, str(PKG_ROOT / 'rdap.py'),
+                'init', '--name', 'bound-agent', '--role', 'test', '--no-internet',
+            ],
+            cwd=PKG_ROOT,
+            env=bind_then_init_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        post_state = {}
+        post_state_path = bind_then_init_home / 'rdap.json'
+        if post_state_path.is_file():
+            post_state = json.loads(post_state_path.read_text(encoding='utf-8'))
+        seed_after = (
+            bind_then_init_home / 'team-repo' / '.team' / 'keys'
+            / 'device_ed25519.seed'
+        )
+        check(
+            'bind then init keeps imported RVN1 and does not invent a seed',
+            prebind.returncode == 0
+            and post_init.returncode == 0
+            and post_state.get('name') == 'bound-agent'
+            and post_state.get('address') == alice.address
+            and post_state.get('public_key') == alice.public_hex
+            and isinstance(post_state.get('raven_bind'), dict)
+            and not seed_after.exists(),
+            (
+                f'pre={prebind.returncode} init={post_init.returncode} '
+                f'state={post_state!r} seed={seed_after.exists()} '
+                f'stderr={post_init.stderr[-500:]!r}'
+            ),
         )
         posix_launcher = (PKG_ROOT / 'rdap').read_text(encoding='utf-8')
         check(

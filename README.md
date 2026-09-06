@@ -377,7 +377,9 @@ export TEAM_LLM_API_KEY_FILE="$HOME/.config/rdap/custom-llm-key"
 
 RDAP currently creates its own key under `.team/keys` and does not submit or receive application payloads through the production `raven-node` ATSAM session actor. The experimental mailbox invokes the separately gated `raven-swarm-mailbox-experimental` binary, not the normal terminal node. Unifying RDAP with the node identity/protected store and encrypted Raven carrier remains required before this can truthfully be called “A2A over production Raven Node.”
 
-That includes the Sprint O6 two-device Raven↔RDAP crypto path: it is **not** present in this snapshot and is not invented here. Use signed standalone RDAP (Quickstart / First task) until the monorepo lands that integration.
+M1 bind path exists for same-RVN1 **public** identity (`./rdap raven-bind` / `./rdap identity bind` imports a raven-node/ash whoami JSON; invite/trust pin that user-identity RVN1). Still no ATSAM seal / `atsam_rvn1` send. **NON-RELEASE / HOLD** remains active; this is not confidential Raven messaging.
+
+That includes the Sprint O6 two-device Raven↔RDAP crypto path: it is **not** present in this snapshot and is not invented here. Use signed standalone RDAP (Quickstart / First task) until the monorepo lands that integration. See RAVEN [ADR 0004](https://github.com/Raven-ASHCO/RAVEN/blob/main/docs/adr/0004-raven-rdap-atsam-transport.md) D3.
 
 ## Verify
 
