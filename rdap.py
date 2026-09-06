@@ -4,12 +4,15 @@
     ./rdap try           prove this machine works (same selftest as CI)
     ./rdap doctor        check Python, Git, deps, and signed-by-default
     ./rdap init          set up this machine's agent
+    ./rdap raven-bind    M1 public same-RVN1 bind (NON-RELEASE / HOLD)
     ./rdap trust         register a teammate by pasting their INVITE line
     ./rdap start         run your agent node (explicit, stable IP/port)
     ./rdap ask "task"    delegate a signed task to a teammate
 
 On Windows use ``rdap.cmd`` instead of ``./rdap``. OPEN MODE (``--open`` /
-``TEAM_REQUIRE_SIGNED=0``) is never the default. Advanced flags still exist
+``TEAM_REQUIRE_SIGNED=0``) is never the default. NON-RELEASE / HOLD is
+active: ``raven-bind`` / ``identity bind`` import public RVN1 only and
+do not claim confidential Raven messaging. Advanced flags still exist
 in ``python -m team_agents --help``.
 """
 
@@ -325,7 +328,13 @@ def _cmd_init_locked(args) -> None:
     else:
         role = input('role (optional, enter to skip): ').strip()
 
-    print(ui.dim('* generating raven identity…'))
+    from team_agents.raven_bind import bound_principal
+
+    already_bound = bound_principal(st)
+    if already_bound:
+        print(ui.dim('* using bound raven-node RVN1 (public bind; no new key)…'))
+    else:
+        print(ui.dim('* generating raven identity…'))
     repo.mkdir(parents=True, exist_ok=True)
     repo_metadata = os.lstat(repo)
     if repo.is_symlink() or not stat.S_ISDIR(repo_metadata.st_mode):
@@ -432,7 +441,10 @@ def _cmd_init_locked(args) -> None:
         checked_git('add', '--', '.gitignore')
         checked_git('commit', '-q', '-m', 'init team memory')
 
-    address, pub = ensure_keys(repo)
+    if already_bound:
+        address, pub = already_bound.address, already_bound.public_key
+    else:
+        address, pub = ensure_keys(repo)
     # A configured trust policy must fail closed if it later disappears.  Give
     # fresh (and pre-policy) wizard homes an explicit, valid empty policy so a
     # new node can still start cleanly before its first teammate is invited.
@@ -460,14 +472,25 @@ def _cmd_init_locked(args) -> None:
     _save_json(STATE_FILE, current)
     st = current
 
-    ui.box([
+    ready_rows = [
         ('identity ', address),
         ('display  ', rvn_display(address)),
-        ('keys     ', str(Path(repo) / '.team' / 'keys')),
         ('online   ', 'yes' if has_net else 'local-only'),
-    ], title=f'{name} is ready')
+    ]
+    if already_bound:
+        ready_rows.insert(2, ('pin      ', ash_invite_line(st)))
+        ready_rows.insert(3, (
+            'bind     ',
+            'same-RVN1 public (NON-RELEASE / HOLD; not confidential)',
+        ))
+    else:
+        ready_rows.insert(2, ('keys     ', str(Path(repo) / '.team' / 'keys')))
+    ui.box(ready_rows, title=f'{name} is ready')
     print(f'\n{ui.bold("share this invite with teammates:")}')
     print(ui.cyan(invite_line(st)))
+    if already_bound:
+        print(ui.cyan(ash_invite_line(st)))
+        print('ash-contact pin of this user-identity RVN1 (pin is not device_ed_pub).')
     print(f'\nnext: `{_cli()} start --provider echo`  (no API key, signed by default)')
     print(f'      `{_cli()} invite --ip <this-host> --port 9001` after the node is up')
     if not st.get('llm'):
@@ -476,6 +499,151 @@ def _cmd_init_locked(args) -> None:
 
 def invite_line(st: dict) -> str:
     return f'RDAP1 {st["name"]} {st["address"]} {st["public_key"]}'
+
+
+def ash_invite_line(st: dict) -> str:
+    """Ash-style contact pin of the advertised user-identity RVN1."""
+    from team_agents.raven_bind import ash_contact_invite
+
+    return ash_contact_invite(str(st['address']), str(st['public_key']))
+
+
+def _read_whoami_bytes(path: Path) -> bytes:
+    """Read a regular, non-symlink whoami file. Never log the body."""
+    from team_agents.raven_bind import MAX_WHOAMI_BYTES
+
+    if path.is_symlink():
+        sys.exit('whoami path must not be a symlink')
+    flags = os.O_RDONLY
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        sys.exit('whoami file not found')
+    except OSError as exc:
+        sys.exit(f'cannot open whoami file: {exc}')
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            sys.exit('whoami path must be a regular file')
+        if metadata.st_size > MAX_WHOAMI_BYTES:
+            sys.exit('whoami document exceeds size limit')
+        raw = os.read(fd, MAX_WHOAMI_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_WHOAMI_BYTES:
+        sys.exit('whoami document exceeds size limit')
+    return raw
+
+
+def _load_whoami_document(args) -> tuple[object, str]:
+    """Resolve --from / --from-node / env to a public whoami object."""
+    from team_agents.raven_bind import resolve_node_export
+
+    from_path = (
+        str(getattr(args, 'from_path', '') or '').strip()
+        or os.environ.get('RDAP_RAVEN_WHOAMI', '').strip()
+        or os.environ.get('RAVEN_WHOAMI_FILE', '').strip()
+    )
+    from_node = (
+        str(getattr(args, 'from_node', '') or '').strip()
+        or os.environ.get('RDAP_RAVEN_DATA_DIR', '').strip()
+        or os.environ.get('RAVEN_DATA_DIR', '').strip()
+    )
+    source = 'file'
+    raw = b''
+    if from_path == '-':
+        source = 'stdin'
+        raw = sys.stdin.buffer.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            sys.exit('whoami document exceeds size limit')
+    elif from_path:
+        raw = _read_whoami_bytes(Path(from_path))
+        source = 'file'
+    elif from_node:
+        try:
+            export = resolve_node_export(from_node)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        raw = _read_whoami_bytes(export)
+        source = 'from-node'
+    else:
+        sys.exit(
+            'raven-bind requires --from <whoami.json>, --from-node <data-dir>, '
+            'or RDAP_RAVEN_WHOAMI / RAVEN_DATA_DIR'
+        )
+    try:
+        document = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        sys.exit('whoami document is not valid JSON')
+    return document, source
+
+
+def cmd_raven_bind(args) -> None:
+    """Import public raven-node whoami and bind this home to that RVN1."""
+    import team_agents.ui as ui
+    from team_agents.raven_bind import (
+        ConfidentialClaimError,
+        PrivateKeyMaterialError,
+        apply_bind,
+        parse_public_whoami,
+        refuse_confidential_claim,
+    )
+
+    document, source = _load_whoami_document(args)
+    try:
+        whoami = parse_public_whoami(document)
+    except PrivateKeyMaterialError:
+        sys.exit('whoami import rejected: private key material is present')
+    except ConfidentialClaimError as exc:
+        sys.exit(str(exc))
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+    try:
+        refuse_confidential_claim('http_signed')
+    except ConfidentialClaimError:
+        pass
+    else:
+        sys.exit('internal error: confidential-claim refuse did not fail closed')
+
+    st = apply_bind(state(), whoami, source=source)
+    _save_json(STATE_FILE, st)
+    ui.box([
+        ('address    ', whoami.address),
+        ('public_key ', whoami.public_key),
+        ('fingerprint', whoami.fingerprint),
+        ('pin        ', whoami.ash_invite()),
+        ('source     ', source),
+    ], title='bound raven-node RVN1 (public material only)')
+    print('NON-RELEASE / HOLD active. Not confidential. No ATSAM seal / atsam_rvn1 send.')
+    print('OPEN MODE stays off. Invite/trust now pin this same user-identity RVN1.')
+    if st.get('name'):
+        print(ui.dim('invite: ') + invite_line(st))
+        print(ui.dim('pin:    ') + ash_invite_line(st))
+
+
+def _add_bind_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        '--from',
+        dest='from_path',
+        default='',
+        help=(
+            'public whoami JSON from raven-node/ash (or - for stdin). '
+            'NON-RELEASE / HOLD — private keys rejected'
+        ),
+    )
+    parser.add_argument(
+        '--from-node',
+        dest='from_node',
+        default='',
+        help=(
+            'raven-node data-dir; reads whoami.public.json export only '
+            '(never the private identity store)'
+        ),
+    )
+    parser.set_defaults(fn=cmd_raven_bind)
 
 
 def cmd_relay_setup(args) -> None:
@@ -652,12 +820,46 @@ def cmd_trust(args) -> None:
         line = input('> ').strip()
 
     parts = line.split()
-    if len(parts) not in {4, 5} or parts[0] != 'RDAP1':
+    invite_url = ''
+    from team_agents.raven_bind import (
+        ConfidentialClaimError,
+        PrivateKeyMaterialError,
+        parse_ash_contact_pin,
+    )
+
+    if parts and parts[0].startswith('raven:'):
+        if len(parts) not in {1, 2}:
+            sys.exit(
+                'invalid ash contact pin — expected: raven:<rvn1>:<pub_hex> '
+                '[http(s)://host:port] (pin is user-identity RVN1, not device_ed_pub)'
+            )
+        try:
+            whoami = parse_ash_contact_pin(parts[0])
+        except PrivateKeyMaterialError:
+            sys.exit('invite rejected: private key material is present')
+        except ConfidentialClaimError as exc:
+            sys.exit(str(exc))
+        except ValueError as exc:
+            sys.exit(f'invalid ash contact pin: {exc}')
+        addr, pub = whoami.address, whoami.public_key
+        tname = str(getattr(args, 'name', '') or '').strip()
+        if not tname:
+            sys.exit(
+                'ash contact pin requires --name <alias>; the pin is the '
+                'user-identity RVN1 (not device_ed_pub)'
+            )
+        if len(parts) == 2:
+            invite_url = parts[1]
+    elif len(parts) in {4, 5} and parts[0] == 'RDAP1':
+        _, tname, addr, pub = parts[:4]
+        if len(parts) == 5:
+            invite_url = parts[4]
+    else:
         sys.exit(
-            'invalid invite — expected: RDAP1 <name> <rvn1...> '
-            '<64-hex pubkey> [http(s)://host:port]'
+            'invalid invite — expected RDAP1 <name> <rvn1...> <64-hex pubkey> '
+            '[url], or ash-style raven:<rvn1>:<pub_hex> with --name '
+            '(user-identity RVN1 pin; not device_ed_pub)'
         )
-    _, tname, addr, pub = parts[:4]
     try:
         _validate_mate_name(tname)
         validate_address_public_key(addr, pub)
@@ -674,11 +876,10 @@ def cmd_trust(args) -> None:
             f'{", ".join(collisions)}; trust was not stored'
         )
 
-    invite_url = ''
     cli_url = ''
     try:
-        if len(parts) == 5:
-            invite_url = _validated_node_url(parts[4])
+        if invite_url:
+            invite_url = _validated_node_url(invite_url)
         if getattr(args, 'url', ''):
             cli_url = _validated_node_url(args.url)
     except ValueError as exc:
@@ -796,12 +997,28 @@ def cmd_start(args) -> None:
     # recreated by the server and therefore remains fail-closed.
     if not PEERS_FILE.exists():
         _save_json(PEERS_FILE, {})
+    from team_agents.raven_bind import bound_principal
+
+    bound = bound_principal(st)
+    seed_file = repo / '.team' / 'keys' / 'device_ed25519.seed'
+    if bound is not None and not seed_file.exists():
+        sys.exit(
+            'M1 public same-RVN1 bind is active and there is no local seed '
+            'for that RVN1. Refusing to invent a parallel .team/keys identity. '
+            'NON-RELEASE / HOLD — not confidential; no ATSAM seal / atsam_rvn1 send'
+        )
     local_address, local_public_key = ensure_keys(repo)
     try:
         validate_address_public_key(local_address, local_public_key)
     except ValueError as exc:
         sys.exit(f'local Raven identity is invalid: {exc}')
     if st.get('address') and st['address'] != local_address:
+        if bound is not None:
+            sys.exit(
+                'bound raven-node RVN1 does not match .team/keys; refusing to '
+                'invent a parallel identity. M1 is public-bind only. '
+                'NON-RELEASE / HOLD — not confidential'
+            )
         sys.exit('saved RDAP address does not match the local private key')
     # always wire the live peers file — trust list may grow while running
     peers_now = load_trusted_peers(PEERS_FILE) if PEERS_FILE.exists() else {}
@@ -995,6 +1212,18 @@ def cmd_invite(args) -> None:
         url = f'http://{advertised_ip}:{args.port}'
         line += f' {url}'
     print(line)
+    from team_agents.raven_bind import bound_principal
+
+    if bound_principal(st) is not None:
+        ash = ash_invite_line(st)
+        if url:
+            print(f'{ash} {url}')
+        else:
+            print(ash)
+        print(
+            'ash-contact pin of this user-identity RVN1 '
+            '(pin is not device_ed_pub). NON-RELEASE / HOLD.'
+        )
 
 
 def cmd_discover(args) -> None:
@@ -2183,7 +2412,10 @@ def cmd_status(args) -> None:
     mates = st.get('teammates', {})
     from team_agents.mesh import find_swarm_bin
 
-    ui.box([
+    from team_agents.raven_bind import bound_principal
+
+    bound = bound_principal(st)
+    rows = [
         ('agent   ', f"{st['name']}" + (f" · {st['role']}" if st.get('role') else '')),
         ('raven id', st.get('address', '?')),
         ('goal    ', (goal[:40] + '…') if len(goal) > 44 else (goal or 'not set')),
@@ -2191,7 +2423,13 @@ def cmd_status(args) -> None:
         ('mailbox ', ('experimental binary present (disabled by default)'
                       if find_swarm_bin() else 'experimental binary not built')),
         ('repo    ', str(st.get('repo', ''))),
-    ], title='RDAP status')
+    ]
+    if bound is not None:
+        rows.append((
+            'bind    ',
+            'same-RVN1 public (NON-RELEASE / HOLD; not confidential)',
+        ))
+    ui.box(rows, title='RDAP status')
 
 
 def cmd_board(args) -> None:
@@ -2485,11 +2723,14 @@ def main() -> None:
         prog='rdap',
         description=(
             'RDAP — signed agent-to-agent tasks. '
-            f'Newcomer path: `{_cli()} try` then `{_cli()} init --name you --no-internet`.'
+            f'Newcomer path: `{_cli()} try` then `{_cli()} init --name you --no-internet`. '
+            'NON-RELEASE / HOLD active.'
         ),
         epilog=(
             'OPEN MODE (--open / TEAM_REQUIRE_SIGNED=0) is never the default. '
-            'Do not add those flags for a first run.'
+            'Do not add those flags for a first run. '
+            'NON-RELEASE / HOLD active: raven-bind / identity bind import public '
+            'RVN1 only and do not claim confidential / atsam_rvn1 send.'
         ),
     )
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -2534,6 +2775,29 @@ def main() -> None:
                    help='skip the internet question with --internet/--no-internet')
     i.set_defaults(fn=cmd_init)
 
+    rb = sub.add_parser(
+        'raven-bind',
+        help=(
+            'M1 bind public same-RVN1 from raven-node whoami '
+            '(NON-RELEASE / HOLD; not confidential)'
+        ),
+    )
+    _add_bind_args(rb)
+
+    idn = sub.add_parser(
+        'identity',
+        help='public RVN1 identity (NON-RELEASE / HOLD; bind is M1 public import)',
+    )
+    idn_sub = idn.add_subparsers(dest='identity_cmd', required=True)
+    idn_bind = idn_sub.add_parser(
+        'bind',
+        help=(
+            'import public raven-node whoami / pin; refuse private keys '
+            '(NON-RELEASE / HOLD; not confidential)'
+        ),
+    )
+    _add_bind_args(idn_bind)
+
     rs = sub.add_parser(
         'relay-setup', help='configure the shared Git remote used by offline relay'
     )
@@ -2543,7 +2807,16 @@ def main() -> None:
     t = sub.add_parser('trust', help="register a teammate's invite")
     t.add_argument(
         'invite', nargs='?',
-        help='four-field RDAP1 line, optionally followed by its http(s) URL',
+        help=(
+            'RDAP1 <name> <rvn1> <pub> [url], or ash-style '
+            'raven:<rvn1>:<pub_hex> with --name (user-identity pin; '
+            'not device_ed_pub)'
+        ),
+    )
+    t.add_argument(
+        '--name',
+        default='',
+        help='teammate alias required when the invite is an ash contact pin',
     )
     t.add_argument('--url', default='', help='verified node URL when invite has none')
     t.add_argument('--token-file', default='', help='Bearer token file for identity fetch')
