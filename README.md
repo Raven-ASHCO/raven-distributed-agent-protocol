@@ -147,6 +147,14 @@ On Windows, replace `./rdap` with `rdap.cmd`, `export RDAP_HOME=...` with `set R
 
 Do not add `--open`, `--allow-shell`, or `--experimental-plaintext-mailbox` for this first task.
 
+### What just happened (task lifecycle)
+
+- Every RPC is **HTTP Raven-signed** (transport). The task/answer body has a **second** delegation signature. Both must pass in signed mode.
+- Tasks are **owner-scoped** to the verified Raven address (List/Get/Subscribe/Cancel).
+- Statuses: **REJECTED** (auth fail, not retained) → **SUBMITTED/WORKING** → **COMPLETED** / **FAILED** / **CANCELED**.
+- **Cancel caveat (open gap):** Cancel force-saves `CANCELED` for the Cancel caller, but the in-flight brain may still finish a COMPLETED artifact. Do **not** treat cancel as fully terminalized yet — see [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1.
+- **Revoke:** address deny-list — [`docs/rdap-revocation.md`](docs/rdap-revocation.md). Signed-mode require-file is **decided policy, not yet enforced**; `doctor` warns if unset.
+
 ## Runtime first-run (start → health → signed task)
 
 `./rdap try` is the zero-placeholder signed proof (same suite as CI). After
@@ -303,7 +311,7 @@ content-aware data-loss prevention: keep secrets outside the delegated project
 tree. Trusting a peer is not a project-write or shell grant unless the receiving
 operator also enables `--allow-shell`.
 
-Sprint 0 freeze of task, auth, and cancellation semantics (including open gaps): [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md).
+Sprint 0 freeze of task, auth, and cancellation semantics (including open gaps): [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md). Address deny-list / revoke footgun: [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
 
 The LLM runtime law, the `OpenAIBrain` → `ToolBox.dispatch` call path, operator
 guidance for `--allow-shell` / `TEAM_ALLOW_SHELL`, and the Sprint 0 residual-risk
