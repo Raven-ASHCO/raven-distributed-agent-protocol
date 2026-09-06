@@ -1069,6 +1069,12 @@ def serve(config: NodeConfig) -> None:
             f'peers={len(cfg.trusted_peers)}',
             flush=True,
         )
+        print(  # noqa: T201
+            f'* [{cfg.name}] keep this process running. In another terminal: '
+            f'`rdap invite --ip <this-host> --port {cfg.port}` then '
+            '`rdap trust` / `rdap ask`. Do not pass --open.',
+            flush=True,
+        )
 
         # Pass the already-bound socket object through Uvicorn's public Server
         # API.  ``uvicorn.run(..., fd=...)`` reconstructs it with

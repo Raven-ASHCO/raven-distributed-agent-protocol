@@ -1,6 +1,8 @@
-# Contributing to RAVEN
+# Contributing to RDAP
 
-Thank you for your interest in contributing to RAVEN! This document provides guidelines for contributing to the project.
+This repository is the published `agent_team/` snapshot of RAVEN (version 1.1.0).
+Protocol-codec edits belong in the RAVEN monorepo and are synced here; do not
+patch `protocol/reference/raven_protocol/` in this tree.
 
 ## Code of Conduct
 
@@ -13,15 +15,15 @@ Thank you for your interest in contributing to RAVEN! This document provides gui
 ### Reporting Bugs
 
 1. Search existing issues to avoid duplicates
-2. Use the bug report template
-3. Include steps to reproduce, expected vs actual behavior
-4. Include device/OS version if relevant
+2. Include the exact `./rdap` / `rdap.cmd` commands, OS, and Python version
+3. Include `./rdap doctor` output when install or first-run is involved
+4. Include expected vs actual behavior
 
 ### Suggesting Features
 
 1. Open an issue with the `[Feature Request]` prefix
 2. Describe the use case and expected behavior
-3. Explain why this would benefit RAVEN users
+3. Explain why this would benefit RDAP operators
 
 ### Security Issues
 
@@ -33,50 +35,35 @@ See [SECURITY.md](SECURITY.md) for responsible disclosure guidelines.
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
 3. Make your changes
-4. Write/update tests if applicable
-5. Ensure code follows existing style conventions
+4. Write/update tests if applicable (`team_agents/selftest.py`)
+5. Ensure `./rdap try` (or `python -m team_agents.selftest`) exits 0
 6. Submit a Pull Request with a clear description
 
-## Development Setup
-
-### Serverless node and terminal (Rust)
+## Development setup
 
 ```bash
-cd node
-cargo test -p raven-core -p raven-node -p ash -p raven-swarm
-cargo test -p raven-core --test network_sim_1000
-cargo run -p ash -- --help
+git clone https://github.com/Raven-ASHCO/raven-distributed-agent-protocol.git
+cd raven-distributed-agent-protocol
+./rdap try
 ```
 
-Platform installation notes live in [`node/INSTALL_Linux.md`](node/INSTALL_Linux.md),
-[`node/INSTALL_macOS.md`](node/INSTALL_macOS.md), and
-[`node/INSTALL_Windows.md`](node/INSTALL_Windows.md). Protocol changes must update
-the deterministic vectors under `shared-vectors/rvn1/` and pass the Python,
-Rust, and Swift parity tests. Security-sensitive experimental features must
-remain disabled by default until their documented activation gate is complete.
+On Windows use `rdap.cmd try`. That creates `.venv`, installs
+`requirements.lock.txt` with hash verification, and runs the same suite as CI.
 
-### Legacy application server (security maintenance only)
-
-The FastAPI application is not part of the new serverless text-message path.
-Do not add a mandatory message, identity, lookup, or routing dependency to it.
-Use this setup only for scoped maintenance of legacy application features:
+Useful commands:
 
 ```bash
-cd server
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env  # Fill in your values
-uvicorn main:app --reload
+./rdap doctor              # Python, Git, deps, signed-by-default
+./rdap selftest            # full A2A suite
+./rdap selftest --unit     # offline unit checks only
+./rdap --help
 ```
 
-### iOS (Swift)
+OPEN MODE (`--open` / `TEAM_REQUIRE_SIGNED=0`) must stay off unless a test is
+explicitly covering that escape hatch. Do not add a default-on path.
 
-1. Open `ios-native/RAVEN/RAVEN.xcodeproj` in Xcode
-2. Build and run on simulator or device
+Runtime/CI installs must use `requirements.lock.txt`, not `requirements.txt`.
 
 ## License
 
 By contributing, you agree that your contributions will be licensed under the AGPL-3.0 License.
-Brand names and visual assets are governed separately by
-[`TRADEMARK.md`](TRADEMARK.md) and [`ASSET_LICENSE.md`](ASSET_LICENSE.md).

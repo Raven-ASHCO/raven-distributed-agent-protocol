@@ -7,8 +7,10 @@ Network part: boots two real nodes (echo brain) and exercises
              card-signature verification + a signed delegated task end-to-end
              via the actual JSON-RPC path.
 
-    ./.venv/bin/python selftest.py            # everything
-    ./.venv/bin/python selftest.py --unit     # offline only
+    ./rdap try                                # newcomer path (doctor + this suite)
+    ./rdap selftest                           # this suite only
+    ./.venv/bin/python -m team_agents.selftest
+    ./.venv/bin/python -m team_agents.selftest --unit
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from team_agents.raven_identity import (  # noqa: E402
 
 PASS = []
 FAIL = []
+TRY_OK = 'RDAP_TRY_OK'
 
 
 def check(name: str, cond: bool, detail: str = '') -> None:
@@ -562,6 +565,77 @@ def unit_tests() -> None:
             },
             f'rc={model_result.returncode} state={configured_model!r} '
             f'stderr={model_result.stderr[-500:]!r}',
+        )
+
+        help_result = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), '--help'],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        help_text = help_result.stdout + help_result.stderr
+        check(
+            'newcomer CLI advertises try, doctor, and selftest',
+            help_result.returncode == 0
+            and all(command in help_text for command in ('try', 'doctor', 'selftest')),
+            help_text[:500],
+        )
+
+        doctor_result = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        doctor_out = doctor_result.stdout + doctor_result.stderr
+        check(
+            'doctor succeeds on a fresh initialized home',
+            doctor_result.returncode == 0
+            and 'RDAP_DOCTOR_OK' in doctor_out
+            and 'OPEN MODE is off' in doctor_out,
+            f'rc={doctor_result.returncode} out={doctor_out[-700:]!r}',
+        )
+
+        open_env = {**init_env, 'TEAM_REQUIRE_SIGNED': '0'}
+        open_doctor = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=open_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        open_out = open_doctor.stdout + open_doctor.stderr
+        check(
+            'doctor refuses OPEN MODE from TEAM_REQUIRE_SIGNED=0',
+            open_doctor.returncode != 0
+            and 'RDAP_DOCTOR_OK' not in open_out
+            and 'TEAM_REQUIRE_SIGNED=0' in open_out,
+            f'rc={open_doctor.returncode} out={open_out[-700:]!r}',
+        )
+
+        unset_home = tmp / 'doctor-before-init'
+        unset_home.mkdir()
+        unset_env = {**init_env, 'RDAP_HOME': str(unset_home)}
+        unset_doctor = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'doctor'],
+            cwd=PKG_ROOT,
+            env=unset_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        unset_out = unset_doctor.stdout + unset_doctor.stderr
+        check(
+            'doctor succeeds before init so newcomers can self-check first',
+            unset_doctor.returncode == 0
+            and 'RDAP_DOCTOR_OK' in unset_out
+            and 'ready before init' in unset_out,
+            f'rc={unset_doctor.returncode} out={unset_out[-700:]!r}',
         )
 
         import rdap as rdap_cli
@@ -3629,7 +3703,9 @@ def main() -> int:
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')
     if FAIL:
         print('FAILED:', ', '.join(FAIL))
-    return 1 if FAIL else 0
+        return 1
+    print(TRY_OK)
+    return 0
 
 
 if __name__ == '__main__':
