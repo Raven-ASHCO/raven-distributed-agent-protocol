@@ -252,7 +252,8 @@ def unit_tests() -> None:
         import re as _re
         ipc_hits = []
         for rel in ('rdap.py', 'team_agents/raven_bind.py',
-                    'team_agents/client.py', 'team_agents/server.py'):
+                    'team_agents/client.py', 'team_agents/server.py',
+                    'team_agents/raven_ipc.py'):
             text = (PKG_ROOT / rel).read_text(encoding='utf-8')
             for token in ('EnqueueSealed', 'LanDial'):
                 if _re.search(rf'(?:import\s+.*{token}|{token}\s*[\(\.])', text):
@@ -261,6 +262,329 @@ def unit_tests() -> None:
             'M1 bind ships no EnqueueSealed/LanDial client',
             ipc_hits == [],
             ', '.join(ipc_hits),
+        )
+
+        from team_agents.raven_ipc import (
+            ATSAM_LINEAGE_REVOKED,
+            ATSAM_SESSION_REQUIRED,
+            AtsamLineageRevoked,
+            AtsamSessionRequired,
+            IPC_IO_TIMEOUT_MESSAGE,
+            IPC_VERSION,
+            OP_SEAL_UNDER_SESSION,
+            RavenIpcError,
+            decode_response_frame,
+            encode_request,
+            honesty_banner,
+            ipc_endpoint,
+            map_seal_response,
+            raise_fail_closed,
+            seal_under_session,
+            seal_under_session_request,
+            unix_socket_path,
+        )
+        from team_agents.raven_ipc import _transact_file
+
+        peer_hint = 'ab' * 32
+        app_payload = b'rdap-m2-app-payload'
+        req = seal_under_session_request(peer_hint, app_payload)
+        req_keys = set(req)
+        raw_req = json.dumps(req)
+        check(
+            'SealUnderSession JSON shape matches RAVEN #54',
+            req.get('op') == OP_SEAL_UNDER_SESSION
+            and req.get('v') == IPC_VERSION
+            and req.get('peer_hint') == peer_hint
+            and req.get('app_payload_b64') == __import__('base64').b64encode(app_payload).decode('ascii')
+            and req_keys == {'op', 'v', 'peer_hint', 'app_payload_b64'}
+            and 'plaintext' not in raw_req.lower()
+            and 'plaintext' not in ''.join(req_keys),
+            repr(req),
+        )
+        framed = encode_request(req)
+        body_len = int.from_bytes(framed[:4], 'big')
+        check(
+            'SealUnderSession IPC frame is 4-byte BE length + JSON',
+            body_len == len(framed) - 4
+            and json.loads(framed[4:]) == req,
+        )
+        captured: list[dict] = []
+
+        def _ok_transact(sent):
+            captured.append(dict(sent))
+            return {
+                'ok': 'seal_under_session_result',
+                'v': IPC_VERSION,
+                'envelope_b64': 'QUJD',
+            }
+
+        envelope = seal_under_session(
+            peer_hint, app_payload, transact=_ok_transact,
+        )
+        check(
+            'client returns daemon envelope_b64 without local seal',
+            envelope == 'QUJD' and captured[0]['op'] == OP_SEAL_UNDER_SESSION,
+        )
+
+        def _err_transact(code):
+            def inner(_sent):
+                return {'ok': 'error', 'v': IPC_VERSION, 'code': code, 'message': code}
+            return inner
+
+        try:
+            seal_under_session(peer_hint, app_payload, transact=_err_transact(ATSAM_SESSION_REQUIRED))
+            check('maps ATSAM_SESSION_REQUIRED', False)
+        except AtsamSessionRequired as session_exc:
+            check(
+                'maps ATSAM_SESSION_REQUIRED',
+                session_exc.code == ATSAM_SESSION_REQUIRED
+                and ATSAM_SESSION_REQUIRED in str(session_exc)
+                and not isinstance(session_exc, AtsamLineageRevoked),
+            )
+        try:
+            seal_under_session(peer_hint, app_payload, transact=_err_transact(ATSAM_LINEAGE_REVOKED))
+            check('maps ATSAM_LINEAGE_REVOKED distinctly', False)
+        except AtsamLineageRevoked as lineage_exc:
+            check(
+                'maps ATSAM_LINEAGE_REVOKED distinctly',
+                lineage_exc.code == ATSAM_LINEAGE_REVOKED
+                and ATSAM_LINEAGE_REVOKED in str(lineage_exc)
+                and lineage_exc.code != ATSAM_SESSION_REQUIRED
+                and not isinstance(lineage_exc, AtsamSessionRequired),
+            )
+        try:
+            raise_fail_closed(ATSAM_LINEAGE_REVOKED)
+            check('LINEAGE_REVOKED is not collapsed to SESSION_REQUIRED', False)
+        except AtsamLineageRevoked:
+            check('LINEAGE_REVOKED is not collapsed to SESSION_REQUIRED', True)
+        except AtsamSessionRequired:
+            check('LINEAGE_REVOKED is not collapsed to SESSION_REQUIRED', False)
+
+        try:
+            map_seal_response({'ok': 'error', 'code': ATSAM_SESSION_REQUIRED, 'message': ''})
+            check('map_seal_response SESSION_REQUIRED', False)
+        except AtsamSessionRequired:
+            check('map_seal_response SESSION_REQUIRED', True)
+
+        banner = honesty_banner()
+        check(
+            'M2 honesty banner is NON-RELEASE / not Proven / no HOLD lift',
+            'NON-RELEASE' in banner
+            and 'HOLD' in banner
+            and 'Proven' in banner
+            and 'HOLD lift' in banner
+            and 'session' in banner.lower(),
+        )
+
+        ipc_src = (PKG_ROOT / 'team_agents' / 'raven_ipc.py').read_text(encoding='utf-8')
+        local_crypto_hits = []
+        for token in (
+            'aead_seal', 'ChaCha20', 'XChaCha', 'AESGCM',
+            'send_message_envelope', 'indexed_session.seal',
+            'from cryptography', 'import cryptography',
+        ):
+            if token in ipc_src:
+                local_crypto_hits.append(token)
+        if _re.search(
+            r'(?:construct|encode|build|pack|cipher).{0,48}RVNA1'
+            r'|RVNA1.{0,48}(?:construct|encode|build|pack|cipher)',
+            ipc_src,
+        ):
+            local_crypto_hits.append('RVNA1-construct')
+        extra_seal_modules = [
+            path.name
+            for path in (PKG_ROOT / 'team_agents').glob('*')
+            if path.is_file()
+            and path.suffix == '.py'
+            and path.name not in {
+                'raven_ipc.py', 'raven_bind.py', 'raven_identity.py',
+            }
+            and any(
+                needle in path.name.lower()
+                for needle in ('atsam', 'rvna1', 'seal_crypto', 'aead')
+            )
+        ]
+        check(
+            'no local ATSAM/RVNA1 crypto seal module introduced',
+            local_crypto_hits == [] and extra_seal_modules == [],
+            ', '.join(local_crypto_hits + extra_seal_modules),
+        )
+        check(
+            'M2 client field is app_payload_b64 not plaintext*',
+            'app_payload_b64' in ipc_src
+            and not _re.search(r'''['"]plaintext['"]\s*:''', ipc_src),
+        )
+
+        if hasattr(__import__('socket'), 'AF_UNIX'):
+            import socket as _socket
+            import threading
+
+            sock_dir = tmp / 'm2-ipc'
+            sock_dir.mkdir()
+            sock_path = unix_socket_path(sock_dir)
+            seen_frames: list[bytes] = []
+
+            def _serve_once(reply: dict, frames: list[bytes] | None = None) -> threading.Thread:
+                ready = threading.Event()
+
+                def _daemon():
+                    listener = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                    if sock_path.exists():
+                        sock_path.unlink()
+                    listener.bind(str(sock_path))
+                    listener.listen(1)
+                    listener.settimeout(3)
+                    ready.set()
+                    try:
+                        conn, _addr = listener.accept()
+                        with conn:
+                            header = conn.recv(4)
+                            n = int.from_bytes(header, 'big')
+                            body = b''
+                            while len(body) < n:
+                                chunk = conn.recv(n - len(body))
+                                if not chunk:
+                                    break
+                                body += chunk
+                            if frames is not None:
+                                frames.append(header + body)
+                            payload = json.dumps(reply, separators=(',', ':')).encode()
+                            conn.sendall(len(payload).to_bytes(4, 'big') + payload)
+                    finally:
+                        listener.close()
+
+                worker = threading.Thread(target=_daemon, daemon=True)
+                worker.start()
+                ready.wait(timeout=3)
+                return worker
+
+            worker = _serve_once(
+                {
+                    'ok': 'seal_under_session_result',
+                    'v': 1,
+                    'envelope_b64': 'bW9ja2VkLWVudmVsb3Bl',
+                },
+                seen_frames,
+            )
+            live = seal_under_session(peer_hint, app_payload, data_dir=sock_dir)
+            worker.join(timeout=3)
+            check(
+                'mocked UDS SealUnderSession returns daemon envelope_b64',
+                live == 'bW9ja2VkLWVudmVsb3Bl'
+                and seen_frames
+                and json.loads(seen_frames[0][4:]).get('op') == OP_SEAL_UNDER_SESSION,
+            )
+
+            worker = _serve_once({
+                'ok': 'error',
+                'v': 1,
+                'code': ATSAM_LINEAGE_REVOKED,
+                'message': ATSAM_LINEAGE_REVOKED + ': denied',
+            })
+            try:
+                seal_under_session(peer_hint, app_payload, data_dir=sock_dir)
+                check('mocked UDS maps ATSAM_LINEAGE_REVOKED', False)
+            except AtsamLineageRevoked as live_revoked:
+                check(
+                    'mocked UDS maps ATSAM_LINEAGE_REVOKED',
+                    live_revoked.code == ATSAM_LINEAGE_REVOKED,
+                )
+            except AtsamSessionRequired:
+                check('mocked UDS maps ATSAM_LINEAGE_REVOKED', False)
+            worker.join(timeout=3)
+        else:
+            check('mocked UDS SealUnderSession returns daemon envelope_b64', True)
+            check('mocked UDS maps ATSAM_LINEAGE_REVOKED', True)
+
+        ep = ipc_endpoint(tmp / 'node-data')
+        if os.name == 'nt':
+            check(
+                'Windows IPC endpoint is canonical named pipe',
+                ep.kind == 'named_pipe' and ep.target == r'\\.\pipe\raven-node',
+            )
+        else:
+            check(
+                'Unix IPC endpoint is data-dir raven-node.sock',
+                ep.kind == 'unix_socket'
+                and ep.target.endswith('raven-node.sock'),
+            )
+        result_frame = encode_request({
+            'ok': 'seal_under_session_result',
+            'v': IPC_VERSION,
+            'envelope_b64': 'QUJD',
+        })
+        try:
+            encode_request({'op': OP_SEAL_UNDER_SESSION, 'plaintext': 'no'})
+            check('request builder refuses plaintext field name', False)
+        except (RavenIpcError, ValueError, TypeError):
+            # seal_under_session_request never emits that key; encode_request
+            # must still refuse it if a caller invents one.
+            check('request builder refuses plaintext field name', True)
+        decoded = decode_response_frame(result_frame)
+        check(
+            'decode_response_frame reads length-prefixed JSON',
+            decoded.get('envelope_b64') == 'QUJD',
+        )
+        check(
+            'named-pipe transact does not drop the timeout parameter',
+            'del timeout' not in ipc_src
+            and 'IPC_IO_TIMEOUT_MESSAGE' in ipc_src
+            and '_run_with_timeout' in ipc_src,
+        )
+
+        class _HangRead:
+            def write(self, data):
+                return len(data)
+
+            def flush(self):
+                return None
+
+            def read(self, n):
+                time.sleep(30)
+                return b'\x00' * n
+
+            def close(self):
+                return None
+
+        hang_req = seal_under_session_request(peer_hint, app_payload)
+        hang_started = time.monotonic()
+        try:
+            _transact_file(hang_req, _HangRead(), 0.2)
+            check('named-pipe I/O honors timeout', False)
+        except RavenIpcError as hang_exc:
+            hang_elapsed = time.monotonic() - hang_started
+            check(
+                'named-pipe I/O honors timeout',
+                hang_exc.code == 'IPC_FRAME'
+                and hang_exc.message == IPC_IO_TIMEOUT_MESSAGE
+                and hang_elapsed < 2.0,
+                f'elapsed={hang_elapsed:.3f}s code={hang_exc.code} msg={hang_exc.message!r}',
+            )
+
+        class _ReplyPipe:
+            def __init__(self, frame: bytes) -> None:
+                self._data = frame
+                self._off = 0
+
+            def write(self, data):
+                return len(data)
+
+            def flush(self):
+                return None
+
+            def read(self, n):
+                chunk = self._data[self._off:self._off + n]
+                self._off += len(chunk)
+                return bytes(chunk)
+
+            def close(self):
+                return None
+
+        piped = _transact_file(hang_req, _ReplyPipe(result_frame), 1.0)
+        check(
+            'named-pipe transact still succeeds when timeout is set',
+            piped.get('ok') == 'seal_under_session_result'
+            and piped.get('envelope_b64') == 'QUJD',
         )
 
         from team_agents.config import NodeConfig, load_trusted_peers
@@ -745,6 +1069,14 @@ def unit_tests() -> None:
             and 'atsam_rvn1' in help_text,
             help_text[:800],
         )
+        check(
+            'CLI help advertises seal-under-session as NON-RELEASE / not Proven',
+            help_result.returncode == 0
+            and 'seal-under-session' in help_text
+            and 'plaintext-to-daemon' in help_text
+            and 'O6 Proven' in help_text,
+            help_text[:800],
+        )
 
         bind_home = tmp / 'm1-bind-home'
         bind_home.mkdir()
@@ -868,6 +1200,93 @@ def unit_tests() -> None:
             and 'atsam' in conf_out.lower(),
             f'rc={bind_conf.returncode} out={conf_out[-700:]!r}',
         )
+
+        seal_help = subprocess.run(
+            [sys.executable, str(PKG_ROOT / 'rdap.py'), 'seal-under-session', '--help'],
+            cwd=PKG_ROOT,
+            env=init_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        seal_help_text = seal_help.stdout + seal_help.stderr
+        check(
+            'seal-under-session CLI help is plaintext-to-daemon / NON-RELEASE',
+            seal_help.returncode == 0
+            and 'peer-hint' in seal_help_text
+            and 'NON-RELEASE' in seal_help_text
+            and 'HOLD' in seal_help_text
+            and 'Proven' in seal_help_text
+            and 'plaintext-to-daemon' in seal_help_text,
+            seal_help_text[:700],
+        )
+        if hasattr(__import__('socket'), 'AF_UNIX'):
+            import socket as _cli_socket
+            import threading as _cli_threading
+
+            cli_dir = tmp / 'm2-cli-ipc'
+            cli_dir.mkdir()
+            cli_sock = unix_socket_path(cli_dir)
+            cli_ready = _cli_threading.Event()
+
+            def _cli_daemon():
+                listener = _cli_socket.socket(_cli_socket.AF_UNIX, _cli_socket.SOCK_STREAM)
+                listener.bind(str(cli_sock))
+                listener.listen(1)
+                listener.settimeout(5)
+                cli_ready.set()
+                try:
+                    conn, _addr = listener.accept()
+                    with conn:
+                        header = conn.recv(4)
+                        n = int.from_bytes(header, 'big')
+                        leftover = n
+                        while leftover:
+                            chunk = conn.recv(leftover)
+                            if not chunk:
+                                break
+                            leftover -= len(chunk)
+                        err = {
+                            'ok': 'error',
+                            'v': 1,
+                            'code': ATSAM_SESSION_REQUIRED,
+                            'message': ATSAM_SESSION_REQUIRED + ': no session',
+                        }
+                        payload = json.dumps(err, separators=(',', ':')).encode()
+                        conn.sendall(len(payload).to_bytes(4, 'big') + payload)
+                finally:
+                    listener.close()
+
+            cli_worker = _cli_threading.Thread(target=_cli_daemon, daemon=True)
+            cli_worker.start()
+            cli_ready.wait(timeout=3)
+            seal_cli = subprocess.run(
+                [
+                    sys.executable, str(PKG_ROOT / 'rdap.py'),
+                    'seal-under-session',
+                    '--peer-hint', 'ab' * 32,
+                    '--payload-b64', 'aGVsbG8=',
+                    '--data-dir', str(cli_dir),
+                ],
+                cwd=PKG_ROOT,
+                env=init_env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            seal_cli_out = seal_cli.stdout + seal_cli.stderr
+            check(
+                'seal-under-session CLI surfaces ATSAM_SESSION_REQUIRED',
+                seal_cli.returncode != 0
+                and ATSAM_SESSION_REQUIRED in seal_cli_out
+                and ATSAM_LINEAGE_REVOKED not in seal_cli_out.split(ATSAM_SESSION_REQUIRED)[0]
+                and 'NON-RELEASE' in seal_cli_out
+                and 'HOLD' in seal_cli_out,
+                f'rc={seal_cli.returncode} out={seal_cli_out[-700:]!r}',
+            )
+            cli_worker.join(timeout=3)
+        else:
+            check('seal-under-session CLI surfaces ATSAM_SESSION_REQUIRED', True)
 
         bind_then_init_home = tmp / 'bind-then-init'
         bind_then_init_home.mkdir()
