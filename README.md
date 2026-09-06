@@ -44,8 +44,26 @@ Re-check the machine later with `./rdap doctor` (or `rdap.cmd doctor`).
 
 Address deny-list (unset `TEAM_REVOCATIONS` is a silent empty set today, not an
 affirmed empty list): [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
-Task / cancel semantics and the open cancel-skew gap:
-[`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1.
+Operator task-status cheat-sheet:
+[`docs/newcomer-task-lifecycle.md`](docs/newcomer-task-lifecycle.md)
+(freeze baseline: [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md)).
+
+### What a task looks like (short)
+
+After `trust` + `ask`, the peer runs an A2A task. Statuses you may see:
+
+- **REJECTED** — signed-mode auth/delegation failed; payload is not journaled; not retained in history.
+- **SUBMITTED → WORKING → COMPLETED** — happy path for `rdap ask` with echo/provider.
+- **FAILED** — executor/brain error.
+- **CANCELED** — Cancel RPC by the **task owner** (same Raven principal that created it); other peers get task-not-found.
+
+Tasks are **owner-scoped**: List/Get/Subscribe/Cancel only see your signed Raven identity’s tasks.
+
+Two independent auth checks: (1) every JSON-RPC request is Raven HTTP-signed; (2) the task/answer payload carries a separate delegation signature. Both must pass in signed mode. Do **not** use `--open` for normal use.
+
+> Cancel currently force-saves a `CANCELED` status for the Cancel caller, but the in-flight brain may still finish a COMPLETED artifact — open conformance gap; do not treat cancel as fully terminalized yet (see lifecycle [§9.1](docs/rdap-task-lifecycle.md#91-critical--cancel-status-skew-open-o5-conformance-gap)).
+
+Details: [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md). Address deny-list / revoke: [`docs/rdap-revocation.md`](docs/rdap-revocation.md). Short operator page: [`docs/newcomer-task-lifecycle.md`](docs/newcomer-task-lifecycle.md).
 
 ## First-ask checklist
 
@@ -73,15 +91,7 @@ Before step 8, also confirm:
   empty deny-list**. That is not “I affirmed nobody is revoked.” Doctor reports
   this. See [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
 
-States a first `ask` may produce:
-
-| You see | Meaning |
-|---|---|
-| `SUBMITTED` / `WORKING` | Accepted, still running |
-| `COMPLETED` | Echo/LLM finished; look for the requested marker in the summary |
-| `FAILED` | Execution error |
-| `REJECTED` | Auth/policy refused the task (unsigned, bad pin, revoked when a file is set) |
-| `canceled` on Cancel RPC | Store force-save for the **Cancel caller** only. The executor/brain may still complete. Open gap: [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1 |
+Statuses after `ask` are listed under [What a task looks like (short)](#what-a-task-looks-like-short). Do not treat Cancel as fully terminalized yet.
 
 ## First task on this machine
 

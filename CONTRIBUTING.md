@@ -64,7 +64,9 @@ Useful commands:
 Newcomer first-ask path: install → `try`/`doctor` → `init` → `start` → `invite`
 → `trust` → `ping` → `ask`. See the README checklist.
 
-Protocol notes (honesty, not “already fixed”):
+Protocol notes (honesty, not “already fixed”). Operator bridge:
+[`docs/newcomer-task-lifecycle.md`](docs/newcomer-task-lifecycle.md). Freeze
+baseline (do not rewrite): [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md).
 
 - Address deny-list / unset `TEAM_REVOCATIONS` footgun: [`docs/rdap-revocation.md`](docs/rdap-revocation.md)
 - Cancel store force-save vs executor/brain complete (open O5 gap, Role #14):
