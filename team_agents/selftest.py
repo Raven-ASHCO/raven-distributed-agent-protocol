@@ -221,6 +221,20 @@ def unit_tests() -> None:
             check('device_ed_pub is not accepted as the pin', False)
         except ValueError:
             check('device_ed_pub is not accepted as the pin', True)
+        try:
+            parse_public_whoami({
+                **public_whoami,
+                'device_ed_pub': eve.public_hex,
+            })
+            check(
+                'device_ed_pub rejected even when public_key is also present',
+                False,
+            )
+        except ValueError as device_with_pub:
+            check(
+                'device_ed_pub rejected even when public_key is also present',
+                'device_ed_pub' in str(device_with_pub),
+            )
         ash_pin = parse_ash_contact_pin(
             f'raven:{alice.address}:{alice.public_hex}'
         )

@@ -216,11 +216,33 @@ def _first_string(document: Mapping[str, Any], names: tuple[str, ...]) -> str:
     return ''
 
 
+def _reject_device_pub_fields(document: object) -> None:
+    """Fail-closed if any device-pub field is present (pin ≢ device_ed_pub).
+
+    Rejects the whole document even when ``public_key`` / ``pub_hex`` is also
+    present. G5: pin is the user-identity RVN1, not device lineage.
+    """
+    stack: list[object] = [document]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            for raw_key, value in node.items():
+                if _norm_key(raw_key) in _DEVICE_KEY_FIELDS:
+                    raise ValueError(
+                        'whoami pin must be the user-identity RVN1; '
+                        'pin is not device_ed_pub'
+                    )
+                stack.append(value)
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+
+
 def parse_public_whoami(document: object) -> PublicWhoami:
     """Parse and validate a public whoami object. Fail-closed on private keys."""
     if not isinstance(document, Mapping):
         raise ValueError('whoami document must be a JSON object')
     _reject_private_and_confidential(document)
+    _reject_device_pub_fields(document)
 
     schema = str(document.get('schema') or document.get('$schema') or '').strip()
     if schema and schema not in WHOAMI_SCHEMA_ALIASES:
@@ -229,12 +251,6 @@ def parse_public_whoami(document: object) -> PublicWhoami:
     address = _first_string(document, _ADDRESS_FIELDS)
     public_key = _first_string(document, _PUBLIC_KEY_FIELDS)
     if not public_key:
-        for raw_key in document:
-            if _norm_key(raw_key) in _DEVICE_KEY_FIELDS:
-                raise ValueError(
-                    'whoami pin must be the user-identity RVN1; '
-                    'pin is not device_ed_pub'
-                )
         raise ValueError('whoami is missing public_key / pub_hex')
     if not address:
         raise ValueError('whoami is missing RVN1 address')
