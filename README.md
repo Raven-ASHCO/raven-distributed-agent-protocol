@@ -6,7 +6,13 @@ RDAP is an **experimental A2A agent-delegation companion** to [RAVEN](https://gi
 
 ## Quickstart
 
-You need **Python 3.10+** (with the `venv` module) and **Git**. No API key, no second device, and no `--open`.
+You need **Python 3.10+** (with the `venv` / `ensurepip` module) and **Git**. No API key, no second device, and no `--open`.
+
+Debian / Ubuntu also need the separate venv package:
+
+```bash
+sudo apt-get install python3 python3-venv python3-pip git
+```
 
 Linux / macOS:
 
@@ -35,6 +41,46 @@ RDAP_TRY_OK
 ```
 
 Re-check the machine later with `./rdap doctor` (or `rdap.cmd doctor`).
+
+Address deny-list (unset `TEAM_REVOCATIONS` is a silent empty set today, not an
+affirmed empty list): [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+Task / cancel semantics and the open cancel-skew gap:
+[`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1.
+
+## First-ask checklist
+
+Copy-paste path from a clean machine to the first signed task. Do **not** skip
+a step. OPEN MODE stays off.
+
+| Step | Command | Done when |
+|---|---|---|
+| 1. Install | `git clone …` then `cd raven-distributed-agent-protocol` (Debian/Ubuntu: `python3-venv` first) | repo is on disk |
+| 2. Prove the machine | `./rdap try` (or `./rdap doctor` then `./rdap selftest`) | `RDAP_DOCTOR_OK` and `RDAP_TRY_OK` |
+| 3. Init each home | `RDAP_HOME=… ./rdap init --name <you> --no-internet` | invite line printed |
+| 4. Start each node | `RDAP_HOME=… ./rdap start --ip … --port … --provider echo` | process stays running; no `--open` |
+| 5. Invite | `RDAP_HOME=… ./rdap invite --ip … --port …` | five-field `RDAP1 … http://…` line |
+| 6. Trust | `RDAP_HOME=… ./rdap trust '<complete invite>'` | `trusted` after live card check |
+| 7. Ping | `RDAP_HOME=… ./rdap ping --name <peer>` | `alive` |
+| 8. Ask | `RDAP_HOME=… ./rdap ask 'Reply exactly: RAVEN_A2A_OK_…' --name <peer>` | `completed task` + marker |
+
+Before step 8, also confirm:
+
+- Both `start` processes are still running (`trust` / `ask` need a live card).
+- The invite pasted into `trust` includes the `http://host:port` URL.
+- No `--open`, no `--allow-shell`, no `TEAM_REQUIRE_SIGNED=0`.
+- `TEAM_REVOCATIONS` is unset by default: signed mode boots with a **silent
+  empty deny-list**. That is not “I affirmed nobody is revoked.” Doctor reports
+  this. See [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+
+States a first `ask` may produce:
+
+| You see | Meaning |
+|---|---|
+| `SUBMITTED` / `WORKING` | Accepted, still running |
+| `COMPLETED` | Echo/LLM finished; look for the requested marker in the summary |
+| `FAILED` | Execution error |
+| `REJECTED` | Auth/policy refused the task (unsigned, bad pin, revoked when a file is set) |
+| `canceled` on Cancel RPC | Store force-save for the **Cancel caller** only. The executor/brain may still complete. Open gap: [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1 |
 
 ## First task on this machine
 
@@ -78,7 +124,7 @@ RDAP_HOME="$PWD/bob-home" ./rdap ping --name alice
 RDAP_HOME="$PWD/bob-home" ./rdap ask 'Reply exactly: RAVEN_A2A_OK_FROM_ALICE' --name alice
 ```
 
-`trust` does a live signed-card check, so the destination `start` must already be running. The echo result should say `completed task` and include the requested marker.
+`trust` does a live signed-card check, so the destination `start` must already be running. Walk the [First-ask checklist](#first-ask-checklist) before the first `ask`. The echo result should say `completed task` and include the requested marker.
 
 On Windows, replace `./rdap` with `rdap.cmd`, `export RDAP_HOME=...` with `set RDAP_HOME=...`, and use double quotes around each invite/task string.
 
@@ -142,9 +188,15 @@ The default server rejects unsigned RPC traffic and unsigned tasks. A trusted pe
   replay/mesh private state, Git internals, symlink/reparse paths, obvious env
   files, credentials, tokens, private-key formats, and hard-linked files.
 - Bearer authentication is advertised and enforced only when a token is configured.
-- Revocation/trust-file failures reject work rather than silently weakening policy.
-- Cancellation requires the task owner's fresh Raven request signature and emits
-  a terminal A2A `canceled` status; a different trusted peer receives task-not-found.
+- Revocation/trust-file failures reject work rather than silently weakening policy
+  **once a path is configured**. An unset `TEAM_REVOCATIONS` / `revocations_file`
+  is still a silent empty deny-list (not an affirmed empty list). See
+  [`docs/rdap-revocation.md`](docs/rdap-revocation.md).
+- Cancellation requires the task owner's fresh Raven request signature. The
+  Cancel RPC caller sees a store-forced A2A `canceled` status; a different
+  trusted peer receives task-not-found. That force-save is **not** end-to-end
+  terminal: the executor/brain may still complete (open gap
+  [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1).
 - Delegation authentication runs before task text reaches durable team memory or
   Git sync; unsigned, invalid, and policy-error requests receive an A2A rejection
   without journaling their payload or moving repository state.

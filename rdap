@@ -28,6 +28,29 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
+_have_rdap_imports() {
+  "$1" -c "import a2a, uvicorn, starlette, cryptography, httpx, zeroconf" 2>/dev/null
+}
+
+_venv_has_pip() {
+  [ -x .venv/bin/python ] && .venv/bin/python -m pip --version >/dev/null 2>&1
+}
+
+_print_venv_help() {
+  echo "ERROR: cannot create a usable virtualenv (venv/ensurepip missing or failed)."
+  echo "Install the venv module, remove a broken .venv if present, then re-run ./rdap try"
+  if command -v brew >/dev/null 2>&1; then
+    echo "  macOS (Homebrew):  brew install python@3.12"
+  elif command -v apt-get >/dev/null 2>&1; then
+    echo "  Debian/Ubuntu:     sudo apt-get install python3 python3-venv python3-pip"
+    echo "  then:              rm -rf .venv && ./rdap try"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "  Fedora:            sudo dnf install python3 python3-pip"
+  else
+    echo "  https://www.python.org/downloads/"
+  fi
+}
+
 # recreate the venv if it was built by an outdated interpreter
 if [ -L .venv ] || { [ -e .venv ] && [ ! -d .venv ]; }; then
   echo "ERROR: refusing unsafe .venv path; it must be absent or a real directory."
@@ -38,9 +61,34 @@ if [ -d .venv ] && ! .venv/bin/python -c 'import sys; sys.exit(0 if sys.version_
   echo "* preserving incompatible virtualenv as $backup"
   mv .venv "$backup"
 fi
+# Debian/Ubuntu often ship python3 without ensurepip. A failed first
+# `python -m venv` leaves a directory of interpreter symlinks and no pip.
+# That husk must not stay: selftest prefers .venv/bin/python when present,
+# and an empty venv hides user-site packages.
+if [ -d .venv ] && ! _venv_has_pip; then
+  echo "* removing incomplete virtualenv (no working pip)"
+  rm -rf .venv
+fi
 if [ ! -d .venv ]; then
+  if ! "$PY" -c 'import ensurepip' 2>/dev/null; then
+    if _have_rdap_imports "$PY"; then
+      echo "* venv/ensurepip unavailable; using $PY (dependencies already installed)"
+      exec "$PY" rdap.py "$@"
+    fi
+    _print_venv_help
+    exit 1
+  fi
   echo "* creating virtualenv with $PY…"
-  "$PY" -m venv .venv
+  if ! "$PY" -m venv .venv; then
+    rm -rf .venv
+    _print_venv_help
+    exit 1
+  fi
+  if ! _venv_has_pip; then
+    rm -rf .venv
+    _print_venv_help
+    exit 1
+  fi
 fi
 
 lock_hash="$(.venv/bin/python -c 'import hashlib; print(hashlib.sha256(open("requirements.lock.txt", "rb").read()).hexdigest())')"

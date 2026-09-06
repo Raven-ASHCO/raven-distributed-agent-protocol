@@ -1793,10 +1793,29 @@ def _run_doctor() -> int:
         bad(
             'dependencies missing: ' + ', '.join(missing_imports),
             f'from this repo run `{_cli()} try` so the launcher can create '
-            '.venv and install requirements.lock.txt',
+            '.venv and install requirements.lock.txt '
+            '(Debian/Ubuntu: sudo apt-get install python3-venv python3-pip first)',
         )
     else:
         ok('dependencies', ', '.join(_REQUIRED_IMPORTS))
+
+    try:
+        import ensurepip  # noqa: F401
+    except ImportError:
+        if missing_imports:
+            bad(
+                'python venv/ensurepip is missing',
+                'Debian/Ubuntu: sudo apt-get install python3-venv python3-pip; '
+                f'then `rm -rf .venv` and `{_cli()} try`',
+            )
+        else:
+            warn(
+                'python venv/ensurepip is missing',
+                f'`{_cli()} try` will use this interpreter because dependencies '
+                'are already installed; install python3-venv for an isolated .venv',
+            )
+    else:
+        ok('python venv', 'ensurepip available')
 
     if NodeConfig().require_signed_tasks is not True:
         bad(
@@ -1823,6 +1842,33 @@ def _run_doctor() -> int:
         )
     else:
         ok('TEAM_ALLOW_SHELL', 'unset (shell tools off)')
+
+    revocations_path = str(
+        os.environ.get('TEAM_REVOCATIONS', '') or ''
+    ).strip()
+    if not revocations_path:
+        warn(
+            'TEAM_REVOCATIONS / revocations_file is unset',
+            'signed mode still boots with a silent empty deny-list '
+            '(no addresses revoked). That is not an affirmed empty list. '
+            'Set TEAM_REVOCATIONS to a JSON file (`[]` is OK). See '
+            'docs/rdap-revocation.md',
+        )
+    else:
+        try:
+            from team_agents.raven_identity import load_revocations
+
+            revoked = load_revocations(revocations_path)
+            ok(
+                'revocations file',
+                f'{revocations_path} ({len(revoked)} address(es))',
+            )
+        except Exception as exc:  # noqa: BLE001
+            bad(
+                'revocations file failed closed',
+                f'fix TEAM_REVOCATIONS={revocations_path}: {exc} — '
+                'docs/rdap-revocation.md',
+            )
 
     st = state()
     if not st.get('name'):
@@ -1912,10 +1958,16 @@ def cmd_try(args) -> None:
         print()
         print(TRY_OK)
         print('This machine can run signed RDAP A2A.')
-        print('Next (same machine, no API key):')
+        print('First-ask checklist: both nodes still running; complete invite URL;')
+        print(f'  `{_cli()} ping --name <peer>` ok; no --open; see README.')
+        print('Cancel RPC `canceled` is a store force-save, not end-to-end')
+        print('  terminal (docs/rdap-task-lifecycle.md §9.1).')
+        print('Unset TEAM_REVOCATIONS is a silent empty deny-list')
+        print('  (docs/rdap-revocation.md) — not an affirmed empty list.')
+        print('Next (README first-ask checklist):')
+        print(f'  try → init → start → invite → trust → ping → ask')
         print(f'  {_cli()} init --name you --role explorer --no-internet')
         print(f'  {_cli()} start --provider echo')
-        print('Two-agent loopback first task: see README Quickstart.')
     else:
         print(f'\nselftest failed. Re-run `{_cli()} doctor`, then `{_cli()} try`.')
     sys.exit(selftest_rc)
@@ -1932,11 +1984,14 @@ def _menu() -> None:
         print('  First, prove this machine works (no API key, OPEN MODE off):')
         print('    ' + ui.cyan(f'{cli} try'))
         print()
-        print('  Then set up this agent:')
+        print('  First-ask path (see README):')
+        print('    try → init → start → invite → trust → ping → ask')
         print('    1. ' + ui.cyan(f'{cli} init --name you --no-internet'))
         print('    2. ' + ui.cyan(f'{cli} start --provider echo'))
         print()
-        print(f'  `{cli} doctor` re-checks Python, Git, and signed-by-default.')
+        print(f'  `{cli} doctor` reports Python, Git, signed-by-default,')
+        print('  and whether TEAM_REVOCATIONS / revocations_file is set.')
+        print('  Cancel is not end-to-end terminal (lifecycle §9.1).')
         return
 
     goal = ''

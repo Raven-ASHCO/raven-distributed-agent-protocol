@@ -41,6 +41,8 @@ See [SECURITY.md](SECURITY.md) for responsible disclosure guidelines.
 
 ## Development setup
 
+Debian / Ubuntu need `python3-venv` (`sudo apt-get install python3 python3-venv python3-pip git`).
+
 ```bash
 git clone https://github.com/Raven-ASHCO/raven-distributed-agent-protocol.git
 cd raven-distributed-agent-protocol
@@ -53,11 +55,20 @@ On Windows use `rdap.cmd try`. That creates `.venv`, installs
 Useful commands:
 
 ```bash
-./rdap doctor              # Python, Git, deps, signed-by-default
+./rdap doctor              # Python, Git, deps, signed-by-default, revocations_file
 ./rdap selftest            # full A2A suite
 ./rdap selftest --unit     # offline unit checks only
 ./rdap --help
 ```
+
+Newcomer first-ask path: install → `try`/`doctor` → `init` → `start` → `invite`
+→ `trust` → `ping` → `ask`. See the README checklist.
+
+Protocol notes (honesty, not “already fixed”):
+
+- Address deny-list / unset `TEAM_REVOCATIONS` footgun: [`docs/rdap-revocation.md`](docs/rdap-revocation.md)
+- Cancel store force-save vs executor/brain complete (open O5 gap, Role #14):
+  [`docs/rdap-task-lifecycle.md`](docs/rdap-task-lifecycle.md) §9.1
 
 OPEN MODE (`--open` / `TEAM_REQUIRE_SIGNED=0`) must stay off unless a test is
 explicitly covering that escape hatch. Do not add a default-on path.
