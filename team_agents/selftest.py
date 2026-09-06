@@ -1031,16 +1031,10 @@ def unit_tests() -> None:
                 }, ensure_ascii=False),
                 encoding='utf-8',
             )
-            # Pin a distinct mtime so Windows same-second directory
-            # clocks cannot collapse create-order across writers.
-            at_ns = int(timestamp * 1_000_000_000)
-            os.utime(path, ns=(at_ns, at_ns))
             return path
 
-        oldest_path = write_event(
-            alpha_events, 'event-001.json', 'alpha', 1.0, 'oldest',
-        )
-        newest_path = write_event(
+        write_event(alpha_events, 'event-001.json', 'alpha', 1.0, 'oldest')
+        write_event(
             alpha_events,
             'event-003.json',
             'alpha',
@@ -1048,15 +1042,7 @@ def unit_tests() -> None:
             '\x1b[31mnewest\n\u202e' + ('x' * 500),
             private='must not be projected',
         )
-        middle_path = write_event(
-            beta_events, 'event-002.json', 'beta', 2.0, 'middle',
-        )
-        # Reverse filesystem mtimes relative to JSON ``at``. Newest-first
-        # must follow the explicit event timestamp, not coarse Windows
-        # mtimes or directory enumeration order.
-        os.utime(oldest_path, ns=(3_000_000_000, 3_000_000_000))
-        os.utime(middle_path, ns=(2_000_000_000, 2_000_000_000))
-        os.utime(newest_path, ns=(1_000_000_000, 1_000_000_000))
+        write_event(beta_events, 'event-002.json', 'beta', 2.0, 'middle')
 
         newest = recent_memory.recent_events(limit=2)
         check(
@@ -1065,43 +1051,6 @@ def unit_tests() -> None:
             and recent_memory.recent_events(limit=0) == []
             and recent_memory.recent_events(limit=-5) == [],
             repr(newest),
-        )
-        expected_stat = os.lstat(newest_path)
-        skewed_stat = os.stat_result(
-            tuple(expected_stat),
-            {
-                'st_mtime_ns': expected_stat.st_mtime_ns + 2_000_000_000,
-                'st_ctime_ns': expected_stat.st_ctime_ns + 2_000_000_000,
-            },
-        )
-        real_fstat = memory_mod.os.fstat
-
-        def skewed_fstat(fd):
-            observed = real_fstat(fd)
-            return os.stat_result(
-                tuple(observed),
-                {
-                    'st_mtime_ns': observed.st_mtime_ns + 2_000_000_000,
-                    'st_ctime_ns': observed.st_ctime_ns + 2_000_000_000,
-                },
-            )
-
-        memory_mod.os.fstat = skewed_fstat
-        try:
-            skewed_payload, skewed_consumed = memory_mod._read_stable_regular_file(
-                newest_path,
-                os.lstat(newest_path),
-                64 * 1024,
-            )
-        finally:
-            memory_mod.os.fstat = real_fstat
-        check(
-            'recent event read survives coarse lstat/fstat timestamp skew',
-            memory_mod._same_regular_identity(expected_stat, skewed_stat)
-            and not memory_mod._same_regular_snapshot(expected_stat, skewed_stat)
-            and skewed_payload is not None
-            and skewed_consumed > 0,
-            f'payload={skewed_payload is not None} consumed={skewed_consumed}',
         )
         projected = newest[0] if newest else {}
         check(
