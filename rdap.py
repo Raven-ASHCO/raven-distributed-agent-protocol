@@ -5,14 +5,16 @@
     ./rdap doctor        check Python, Git, deps, and signed-by-default
     ./rdap init          set up this machine's agent
     ./rdap raven-bind    M1 public same-RVN1 bind (NON-RELEASE / HOLD)
+    ./rdap seal-under-session   M2 plaintext-to-daemon seal (NON-RELEASE / HOLD)
     ./rdap trust         register a teammate by pasting their INVITE line
     ./rdap start         run your agent node (explicit, stable IP/port)
     ./rdap ask "task"    delegate a signed task to a teammate
 
 On Windows use ``rdap.cmd`` instead of ``./rdap``. OPEN MODE (``--open`` /
 ``TEAM_REQUIRE_SIGNED=0``) is never the default. NON-RELEASE / HOLD is
-active: ``raven-bind`` / ``identity bind`` import public RVN1 only and
-do not claim confidential Raven messaging. Advanced flags still exist
+active: ``raven-bind`` / ``identity bind`` import public RVN1 only.
+``seal-under-session`` is plaintext-to-daemon only (not local ATSAM,
+not O6 Proven, no HOLD lift). Advanced flags still exist
 in ``python -m team_agents --help``.
 """
 
@@ -644,6 +646,64 @@ def _add_bind_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.set_defaults(fn=cmd_raven_bind)
+
+
+def cmd_seal_under_session(args) -> None:
+    """Submit app payload bytes to raven-node SealUnderSession (plaintext-to-daemon)."""
+    from team_agents.raven_ipc import (
+        AtsamLineageRevoked,
+        AtsamSessionRequired,
+        RavenIpcError,
+        default_raven_data_dir,
+        honesty_banner,
+        seal_under_session,
+    )
+
+    print(honesty_banner(), file=sys.stderr)
+    peer_hint = str(getattr(args, 'peer_hint', '') or '').strip()
+    if not peer_hint:
+        sys.exit('seal-under-session requires --peer-hint (64 hex device Ed25519)')
+    payload_b64 = str(getattr(args, 'payload_b64', '') or '').strip()
+    payload_file = str(getattr(args, 'payload_file', '') or '').strip()
+    if payload_b64 and payload_file:
+        sys.exit('use only one of --payload-b64 or --payload-file')
+    try:
+        if payload_b64:
+            import base64
+
+            app_payload = base64.b64decode(payload_b64, validate=False)
+        elif payload_file == '-':
+            app_payload = sys.stdin.buffer.read()
+        elif payload_file:
+            path = Path(payload_file)
+            if path.is_symlink() or not path.is_file():
+                sys.exit('payload file must be a regular file')
+            app_payload = path.read_bytes()
+        else:
+            sys.exit('seal-under-session requires --payload-b64 or --payload-file')
+    except (OSError, ValueError) as exc:
+        sys.exit(f'cannot read app payload: {exc}')
+
+    data_dir = str(getattr(args, 'data_dir', '') or '').strip()
+    resolved = Path(data_dir) if data_dir else default_raven_data_dir()
+    try:
+        envelope_b64 = seal_under_session(
+            peer_hint,
+            app_payload,
+            data_dir=resolved,
+        )
+    except AtsamLineageRevoked as exc:
+        sys.exit(str(exc))
+    except AtsamSessionRequired as exc:
+        sys.exit(str(exc))
+    except (RavenIpcError, ValueError, TypeError) as exc:
+        sys.exit(str(exc))
+    print(json.dumps({'envelope_b64': envelope_b64}, indent=2))
+    print(
+        'NON-RELEASE / HOLD. Not O6 Proven. envelope_b64 is daemon-sealed; '
+        'RDAP did not construct ATSAM/RVNA1 ciphertext.',
+        file=sys.stderr,
+    )
 
 
 def cmd_relay_setup(args) -> None:
@@ -2730,7 +2790,9 @@ def main() -> None:
             'OPEN MODE (--open / TEAM_REQUIRE_SIGNED=0) is never the default. '
             'Do not add those flags for a first run. '
             'NON-RELEASE / HOLD active: raven-bind / identity bind import public '
-            'RVN1 only and do not claim confidential / atsam_rvn1 send.'
+            'RVN1 only and do not claim confidential / atsam_rvn1 send. '
+            'seal-under-session is plaintext-to-daemon only; not O6 Proven; '
+            'no HOLD lift; seal still requires a raven-node session.'
         ),
     )
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -2797,6 +2859,38 @@ def main() -> None:
         ),
     )
     _add_bind_args(idn_bind)
+
+    seal = sub.add_parser(
+        'seal-under-session',
+        help=(
+            'M2 submit app payload to raven-node SealUnderSession IPC '
+            '(plaintext-to-daemon only; NON-RELEASE / HOLD; not O6 Proven)'
+        ),
+    )
+    seal.add_argument(
+        '--peer-hint',
+        required=True,
+        help='peer device Ed25519 as 64 hex chars (same plane as ash LanDial)',
+    )
+    seal.add_argument(
+        '--payload-b64',
+        default='',
+        help='application payload bytes already base64-encoded (not a plaintext* field)',
+    )
+    seal.add_argument(
+        '--payload-file',
+        default='',
+        help='read application payload bytes from a file, or - for stdin',
+    )
+    seal.add_argument(
+        '--data-dir',
+        default='',
+        help=(
+            'raven-node data-dir (UDS <data-dir>/raven-node.sock). '
+            'Default: RAVEN_DATA_DIR / ASH_DATA_DIR / RDAP_RAVEN_DATA_DIR / ~/.raven'
+        ),
+    )
+    seal.set_defaults(fn=cmd_seal_under_session)
 
     rs = sub.add_parser(
         'relay-setup', help='configure the shared Git remote used by offline relay'

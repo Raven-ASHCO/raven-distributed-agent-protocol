@@ -377,9 +377,11 @@ export TEAM_LLM_API_KEY_FILE="$HOME/.config/rdap/custom-llm-key"
 
 RDAP currently creates its own key under `.team/keys` and does not submit or receive application payloads through the production `raven-node` ATSAM session actor. The experimental mailbox invokes the separately gated `raven-swarm-mailbox-experimental` binary, not the normal terminal node. Unifying RDAP with the node identity/protected store and encrypted Raven carrier remains required before this can truthfully be called “A2A over production Raven Node.”
 
-M1 bind path exists for same-RVN1 **public** identity (`./rdap raven-bind` / `./rdap identity bind` imports a raven-node/ash whoami JSON; invite/trust pin that user-identity RVN1). Still no ATSAM seal / `atsam_rvn1` send. **NON-RELEASE / HOLD** remains active; this is not confidential Raven messaging.
+M1 bind path exists for same-RVN1 **public** identity (`./rdap raven-bind` / `./rdap identity bind` imports a raven-node/ash whoami JSON; invite/trust pin that user-identity RVN1).
 
-That includes the Sprint O6 two-device Raven↔RDAP crypto path: it is **not** present in this snapshot and is not invented here. Use signed standalone RDAP (Quickstart / First task) until the monorepo lands that integration. See RAVEN [ADR 0004](https://github.com/Raven-ASHCO/RAVEN/blob/main/docs/adr/0004-raven-rdap-atsam-transport.md) D3.
+M2 plaintext-to-daemon client exists (`./rdap seal-under-session` / `team_agents.raven_ipc`): it submits `app_payload_b64` over the existing local raven-node IPC (`SealUnderSession`, companion to RAVEN #54) and returns daemon `envelope_b64`. It does **not** invent Python ATSAM / RVNA1 ciphertext. Seal still requires a persisted raven-node ATSAM session (`ATSAM_SESSION_REQUIRED` / `ATSAM_LINEAGE_REVOKED` stay fail-closed and distinct). This is **not** confidential RDAP delivery, **not** O6 E2E Proven, and does **not** lift HOLD. Soft-load P0 remains held.
+
+**NON-RELEASE / HOLD** remains active. Use signed standalone RDAP (Quickstart / First task) until a two-device encrypted harness exists. See RAVEN [ADR 0004](https://github.com/Raven-ASHCO/RAVEN/blob/main/docs/adr/0004-raven-rdap-atsam-transport.md) D4.
 
 ## Verify
 
